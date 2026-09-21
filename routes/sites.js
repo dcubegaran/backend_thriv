@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { protect, requireRole } = require('../middleware/auth');
 const {
-  getSites, getSite, createSite, updateSite,
+  getSites, getSite, downloadSiteReport, createSite, updateSite,
   addLabour, getLabourLogs, updateLabourLog, addMaterial, getMaterialLogs,
   addUnexpectedCost, getUnexpectedCosts, addContract, getContracts
 } = require('../controllers/siteController');
@@ -12,6 +12,7 @@ router.use(protect);
 router.get('/', getSites);
 router.post('/', requireRole('superadmin', 'admin', 'supervisor'), createSite);
 router.get('/:id', getSite);
+router.post('/:id/report-pdf', downloadSiteReport);
 router.put('/:id', updateSite);
 
 router.post('/:id/labour', addLabour);

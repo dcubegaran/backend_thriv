@@ -6,10 +6,12 @@ const SiteContract = require('../models/SiteContract');
 const Attendance = require('../models/Attendance');
 const LabourType = require('../models/LabourType');
 const Worker = require('../models/Worker');
+const Credit = require('../models/Credit');
 const Material = require('../models/Material');
 const ContractType = require('../models/ContractType');
 const User = require('../models/User');
 const { isValidObjectId } = require('../utils/validate');
+const { generateSiteReportPDF } = require('../utils/siteReportPdf');
 const {
   calcLabourTotal, calcMaterialTotal, calcCurrentSpend,
   calcRemainingAmount, calcRemainingBudget, calcSiteProfit, shouldShowWarning
@@ -115,6 +117,109 @@ exports.getSite = async (req, res) => {
     res.json({ success: true, site: s });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to get site' });
+  }
+};
+
+// POST /api/sites/:id/report-pdf   body: { start, end, advances }
+// start/end are YYYY-MM-DD. `advances` maps a worker+labour-type key to the advance
+// entered on the site page (advances aren't stored, so the page sends what it shows).
+exports.downloadSiteReport = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid site ID' });
+    }
+    const { start, end, advances } = req.body || {};
+    const dateFormat = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateFormat.test(start || '') || !dateFormat.test(end || '')) {
+      return res.status(400).json({ success: false, message: 'Start and end dates are required (YYYY-MM-DD)' });
+    }
+    // Entries are stored at UTC midnight of the chosen day, so compare in UTC
+    const from = new Date(`${start}T00:00:00.000Z`);
+    const to = new Date(`${end}T23:59:59.999Z`);
+    if (isNaN(from) || isNaN(to)) {
+      return res.status(400).json({ success: false, message: 'Invalid date range' });
+    }
+    if (from > to) {
+      return res.status(400).json({ success: false, message: 'Start date must be on or before end date' });
+    }
+
+    const site = await Site.findById(req.params.id);
+    if (!site) return res.status(404).json({ success: false, message: 'Site not found' });
+    if (!canAccessSite(req.user, site)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const dateRange = { $gte: from, $lte: to };
+    const [labourLogs, credits] = await Promise.all([
+      LabourLog.find({ siteId: site._id, date: dateRange }).sort({ date: 1 }),
+      Credit.find({ siteId: site._id, date: dateRange }).sort({ date: 1 }),
+    ]);
+
+    // Group attendance by date, then by labour type: how many were present that day
+    // (logs are already sorted by date ascending)
+    const byDate = new Map();
+    labourLogs.forEach(log => {
+      const dateKey = log.date.toISOString().slice(0, 10);
+      const counts = byDate.get(dateKey) || new Map();
+      counts.set(log.labourTypeNameSnapshot, (counts.get(log.labourTypeNameSnapshot) || 0) + Number(log.days || 0));
+      byDate.set(dateKey, counts);
+    });
+    const attendance = [...byDate.entries()].map(([date, counts]) => ({
+      date,
+      entries: [...counts.entries()]
+        .map(([labourType, days]) => ({ labourType, days }))
+        .sort((a, b) => a.labourType.localeCompare(b.labourType)),
+    }));
+
+    // Worker-wise summary, same grouping as the Weekly Attendance table on the site page
+    const advanceFor = key => {
+      const value = Number(advances && typeof advances === 'object' ? advances[key] : 0);
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    };
+    const workerRows = new Map();
+    labourLogs.forEach(log => {
+      const key = `${log.workerId || log.workerNameSnapshot}-${log.labourTypeId || log.labourTypeNameSnapshot}`;
+      const row = workerRows.get(key) || {
+        workerName: log.workerNameSnapshot,
+        labourType: log.labourTypeNameSnapshot,
+        days: 0,
+        totalSalary: 0,
+        advancePaid: advanceFor(key),
+      };
+      row.days += Number(log.days || 0);
+      row.totalSalary += Number(log.totalAmount || 0);
+      workerRows.set(key, row);
+    });
+    const workers = [...workerRows.values()]
+      .map(row => ({ ...row, remaining: Math.max(row.totalSalary - row.advancePaid, 0) }))
+      .sort((a, b) => a.workerName.localeCompare(b.workerName));
+
+    const pdf = await generateSiteReportPDF({
+      range: { start, end },
+      site: {
+        siteName: site.siteName,
+        location: site.location,
+        ownerName: site.ownerName,
+        ownerPhone: site.ownerPhone,
+        sqft: site.sqft,
+        status: site.status,
+        startDate: site.startDate,
+        endDate: site.endDate,
+      },
+      workers,
+      attendance,
+      credits: credits.map(c => ({ date: c.date, shopName: c.shopName, amount: c.amount, status: c.status })),
+    });
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="site-report-${start}-to-${end}.pdf"`,
+      'Content-Length': pdf.length,
+    });
+    res.send(pdf);
+  } catch (err) {
+    console.error('Site report PDF failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to generate PDF' });
   }
 };
 

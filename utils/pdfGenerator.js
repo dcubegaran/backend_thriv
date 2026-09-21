@@ -19,6 +19,30 @@ function formatDate(date) {
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
+// ---- Fonts -----------------------------------------------------------------
+// The bundled Noto Sans Tamil files only contain Tamil letters and the rupee sign
+// (no Latin letters, digits or punctuation), while Helvetica has no Tamil and no
+// rupee sign. So text is split into runs: Tamil script and "₹" use the Tamil font,
+// everything else uses Helvetica.
+const FONT_DIR = path.join(__dirname, '..', 'fonts');
+const SYSTEM_TAMIL_FALLBACKS = [
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf',
+  '/usr/share/fonts/truetype/tlwg/Loma.ttf',
+  'C:/Windows/Fonts/Latha.ttf',
+  'C:/Windows/Fonts/tam.ttf',
+];
+const TAMIL_REGULAR_FILE = path.join(FONT_DIR, 'noto-sans-tamil-tamil-400.ttf');
+const TAMIL_BOLD_FILE = path.join(FONT_DIR, 'noto-sans-tamil-tamil-700.ttf');
+const firstExisting = paths => paths.find(p => fs.existsSync(p));
+const TAMIL_FONT_REGULAR = firstExisting([TAMIL_REGULAR_FILE, TAMIL_BOLD_FILE, ...SYSTEM_TAMIL_FALLBACKS]);
+const TAMIL_FONT_BOLD = firstExisting([TAMIL_BOLD_FILE, TAMIL_REGULAR_FILE, ...SYSTEM_TAMIL_FALLBACKS]);
+const HAS_TAMIL_FONT = Boolean(TAMIL_FONT_REGULAR && TAMIL_FONT_BOLD);
+
+// Tamil block, zero-width joiners used inside Tamil words, and the rupee sign
+const INDIC_CHAR_RE = /[\u0B80-\u0BFF\u200C\u200D\u20B9]/;
+const RUN_RE = /[\u0B80-\u0BFF\u200C\u200D\u20B9]+|[^\u0B80-\u0BFF\u200C\u200D\u20B9]+/g;
+
 /**
  * Generate a professional quotation PDF
  * quoteData: { quoteNumber, date, customer, sqftRate, baseAmount, offersApplied, finalAmount, terms, language, company }
@@ -27,24 +51,6 @@ async function generateQuotePDF(quoteData) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 50, size: 'A4' });
     const chunks = [];
-    const fallbackTamilFonts = [
-      path.join(__dirname, '..', 'fonts', 'noto-sans-tamil-tamil-700.ttf'),
-      path.join(__dirname, '..', 'fonts', 'noto-sans-tamil-tamil-400.ttf'),
-      '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-      '/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf',
-      '/usr/share/fonts/truetype/tlwg/Loma.ttf',
-      'C:/Windows/Fonts/Latha.ttf',
-      'C:/Windows/Fonts/tam.ttf',
-    ];
-    const tamilFont = fallbackTamilFonts.find(fontPath => fs.existsSync(fontPath));
-    const applyLanguageFont = (size, weight = 'regular') => {
-      if (isTamil && tamilFont) {
-        doc.font(tamilFont).fontSize(size);
-      } else {
-        doc.font(weight === 'bold' ? 'Helvetica-Bold' : 'Helvetica').fontSize(size);
-      }
-      return doc;
-    };
 
     doc.on('data', chunk => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -63,23 +69,130 @@ async function generateQuotePDF(quoteData) {
     const borderColor = '#cccccc';
     const mutedColor = '#555555';
 
+    // ---- Text helpers (font is chosen per run, see the notes on fonts above) ----
+    const latinFont = bold => (bold ? 'Helvetica-Bold' : 'Helvetica');
+    const indicFont = bold => (bold ? TAMIL_FONT_BOLD : TAMIL_FONT_REGULAR);
+    const isIndicRun = run => INDIC_CHAR_RE.test(run);
+
+    // Without any Tamil-capable font the rupee sign can't be drawn, so spell it out
+    const prepare = value => {
+      const str = String(value ?? '');
+      return HAS_TAMIL_FONT ? str : str.replace(/\u20B9/g, 'Rs. ');
+    };
+    const needsIndicFont = str => HAS_TAMIL_FONT && INDIC_CHAR_RE.test(str);
+
+    const useRunFont = (run, size, bold) => {
+      doc.font(isIndicRun(run) ? indicFont(bold) : latinFont(bold)).fontSize(size);
+    };
+    const ascent = (font, size) => {
+      doc.font(font).fontSize(size);
+      return ((doc._font && doc._font.ascender) || 0) / 1000 * size;
+    };
+
+    const runsOf = str => str.match(RUN_RE) || [];
+    const widthOf = (value, size, bold = false) => {
+      const str = prepare(value);
+      if (!needsIndicFont(str)) {
+        doc.font(latinFont(bold)).fontSize(size);
+        return doc.widthOfString(str);
+      }
+      return runsOf(str).reduce((sum, run) => {
+        useRunFont(run, size, bold);
+        return sum + doc.widthOfString(run);
+      }, 0);
+    };
+
+    // Draws one line made of Latin / Tamil runs, keeping them on a common baseline
+    const drawLine = (str, x, y, size, bold) => {
+      const latinAscent = ascent(latinFont(bold), size);
+      let cx = x;
+      runsOf(str).forEach(run => {
+        const indic = isIndicRun(run);
+        const offset = indic ? latinAscent - ascent(indicFont(bold), size) : 0;
+        useRunFont(run, size, bold);
+        doc.text(run, cx, y + offset, { lineBreak: false });
+        cx += doc.widthOfString(run);
+      });
+    };
+
+    const wrapLines = (str, maxWidth, size, bold) => {
+      const lines = [];
+      str.split('\n').forEach(paragraph => {
+        let line = '';
+        let lineWidth = 0;
+        paragraph.split(/(\s+)/).forEach(token => {
+          if (!token) return;
+          const isSpace = token.trim() === '';
+          const tokenWidth = widthOf(token, size, bold);
+          if (!isSpace && line && lineWidth + tokenWidth > maxWidth) {
+            lines.push(line.trimEnd());
+            line = '';
+            lineWidth = 0;
+          }
+          if (isSpace && !line) return;
+          line += token;
+          lineWidth += tokenWidth;
+        });
+        lines.push(line.trimEnd());
+      });
+      return lines;
+    };
+
+    /**
+     * Write text at (x, y). Returns the y just below the text.
+     * options: { size, bold, color, width, align, lineGap }
+     * Latin-only text goes straight through pdfkit; text with Tamil or "₹" is laid out run by run.
+     */
+    const write = (value, x, y, { size = 10, bold = false, color = darkColor, width, align = 'left', lineGap = 0 } = {}) => {
+      const str = prepare(value);
+      doc.fillColor(color);
+
+      if (!needsIndicFont(str)) {
+        const options = { align, lineGap };
+        if (width !== undefined) options.width = width;
+        doc.font(latinFont(bold)).fontSize(size).text(str, x, y, options);
+        return doc.y;
+      }
+
+      const boxWidth = width !== undefined ? width : doc.page.width - doc.page.margins.right - x;
+      const lineHeight = Math.max(
+        doc.font(latinFont(bold)).fontSize(size).currentLineHeight(true),
+        doc.font(indicFont(bold)).fontSize(size).currentLineHeight(true),
+      ) + lineGap;
+      const lines = wrapLines(str, boxWidth, size, bold);
+      let ly = y;
+      lines.forEach(line => {
+        // Long text continues on a new page, as pdfkit does for plain text
+        if (ly + lineHeight > doc.page.height - doc.page.margins.bottom) {
+          doc.addPage();
+          doc.fillColor(color);
+          ly = doc.page.margins.top;
+        }
+        const lineWidth = widthOf(line, size, bold);
+        let lx = x;
+        if (align === 'right') lx = x + boxWidth - lineWidth;
+        else if (align === 'center') lx = x + (boxWidth - lineWidth) / 2;
+        drawLine(line, lx, ly, size, bold);
+        ly += lineHeight;
+      });
+      doc.y = ly;
+      return ly;
+    };
+
     // ---- Header ----
     doc.rect(0, 0, doc.page.width, 110).fill('#f5f5f0');
 
     // Company name
-    applyLanguageFont(22, 'bold').fillColor(accentColor)
-       .text(company.nameEn || 'Balu Hari Builders', 50, 25, { align: 'center' });
+    write(company.nameEn || 'Balu Hari Builders', 50, 25, { size: 22, bold: true, color: accentColor, align: 'center' });
 
     if (isTamil && company.nameTa) {
-      applyLanguageFont(14).fillColor(accentColor)
-         .text(company.nameTa, 50, 50, { align: 'center' });
+      write(company.nameTa, 50, 50, { size: 14, color: accentColor, align: 'center' });
     }
 
-    applyLanguageFont(10).fillColor(mutedColor)
-       .text(
-         [company.address, company.phone, company.email].filter(Boolean).join('  |  '),
-         50, 72, { align: 'center' }
-       );
+    write(
+      [company.address, company.phone, company.email].filter(Boolean).join('  |  '),
+      50, 72, { size: 10, color: mutedColor, align: 'center' }
+    );
 
     // Divider
     doc.moveTo(50, 115).lineTo(doc.page.width - 50, 115).strokeColor(accentColor).lineWidth(2).stroke();
@@ -87,27 +200,25 @@ async function generateQuotePDF(quoteData) {
     // ---- Quotation Title ----
     doc.moveDown(0.5);
     const titleText = isTamil ? 'மதிப்பீடு' : 'QUOTATION';
-    applyLanguageFont(16, 'bold').fillColor(accentColor)
-       .text(titleText, 50, 130, { align: 'center' });
+    write(titleText, 50, 130, { size: 16, bold: true, color: accentColor, align: 'center' });
 
     // Quote number and date
-    applyLanguageFont(10).fillColor(darkColor)
-       .text(isTamil ? `மதிப்பீடு எண்: ${quoteNumber}` : `Quote No: ${quoteNumber}`, 50, 158)
-       .text(isTamil ? `தேதி: ${formatDate(date)}` : `Date: ${formatDate(date)}`, doc.page.width - 200, 158, { align: 'right' });
+    write(isTamil ? `மதிப்பீடு எண்: ${quoteNumber}` : `Quote No: ${quoteNumber}`, 50, 158, { size: 10 });
+    write(isTamil ? `தேதி: ${formatDate(date)}` : `Date: ${formatDate(date)}`, doc.page.width - 200, 158, { size: 10, align: 'right' });
 
     // Divider
     doc.moveTo(50, 175).lineTo(doc.page.width - 50, 175).strokeColor(borderColor).lineWidth(1).stroke();
 
     // ---- Customer Details ----
     const custLabel = isTamil ? 'வாடிக்கையாளர் விவரங்கள்' : 'Customer Details';
-    applyLanguageFont(11, 'bold').fillColor(accentColor)
-       .text(custLabel, 50, 185);
+    write(custLabel, 50, 185, { size: 11, bold: true, color: accentColor });
 
-    applyLanguageFont(10).fillColor(darkColor);
     let cy = 202;
     const addField = (label, value) => {
-      applyLanguageFont(10, 'bold').text(label + ': ', 50, cy, { continued: true });
-      applyLanguageFont(10).text(value || '-');
+      // bold label followed by the regular value on the same line
+      const labelText = label + ': ';
+      write(labelText, 50, cy, { size: 10, bold: true });
+      write(value || '-', 50 + widthOf(labelText, 10, true), cy, { size: 10 });
       cy += 16;
     };
 
@@ -124,7 +235,7 @@ async function generateQuotePDF(quoteData) {
 
     // ---- Construction Estimate ----
     const estLabel = isTamil ? 'கட்டிட மதிப்பீடு' : 'Construction Estimate';
-    applyLanguageFont(11, 'bold').fillColor(accentColor).text(estLabel, 50, cy);
+    write(estLabel, 50, cy, { size: 11, bold: true, color: accentColor });
     cy += 20;
 
     const tableLeft = 50;
@@ -132,13 +243,8 @@ async function generateQuotePDF(quoteData) {
     const colDesc = 320;
 
     const drawRow = (label, value, bold = false) => {
-      if (bold) {
-        applyLanguageFont(10, 'bold').fillColor(darkColor);
-      } else {
-        applyLanguageFont(10).fillColor(darkColor);
-      }
-      doc.text(label, tableLeft, cy, { width: colDesc - tableLeft });
-      doc.text(formatINR(value), colDesc, cy, { width: tableRight - colDesc, align: 'right' });
+      write(label, tableLeft, cy, { size: 10, bold, width: colDesc - tableLeft });
+      write(formatINR(value), colDesc, cy, { size: 10, bold, width: tableRight - colDesc, align: 'right' });
       cy += 18;
     };
 
@@ -177,28 +283,27 @@ async function generateQuotePDF(quoteData) {
       cy += 15;
 
       const termsLabel = isTamil ? 'விதிமுறைகள் மற்றும் நிபந்தனைகள்' : 'Terms & Conditions';
-      applyLanguageFont(11, 'bold').fillColor(accentColor).text(termsLabel, 50, cy);
+      write(termsLabel, 50, cy, { size: 11, bold: true, color: accentColor });
       cy += 18;
 
-      applyLanguageFont(9).fillColor(darkColor).text(terms, 50, cy, { width: doc.page.width - 100, lineGap: 3 });
-
-      cy = doc.y + 20;
+      cy = write(terms, 50, cy, { size: 9, width: doc.page.width - 100, lineGap: 3 }) + 20;
     }
 
     // ---- Footer ----
+    // If the terms ran down to the footer area, give the footer its own page instead of overlapping
+    if (cy > doc.page.height - 110) doc.addPage();
+    // Drawn inside the bottom margin, so switch the margin off to stop pdfkit adding a blank page
+    doc.page.margins.bottom = 0;
     const footerY = doc.page.height - 100;
     doc.moveTo(50, footerY).lineTo(doc.page.width - 50, footerY).strokeColor(borderColor).lineWidth(1).stroke();
 
-    applyLanguageFont(9).fillColor(mutedColor)
-       .text(isTamil ? 'அங்கீகரிக்கப்பட்டது:' : 'Authorized By:', 50, footerY + 15);
-    applyLanguageFont(10, 'bold').fillColor(accentColor)
-       .text(company.nameEn || 'Balu Hari Builders', 50, footerY + 30);
+    write(isTamil ? 'அங்கீகரிக்கப்பட்டது:' : 'Authorized By:', 50, footerY + 15, { size: 9, color: mutedColor });
+    write(company.nameEn || 'Balu Hari Builders', 50, footerY + 30, { size: 10, bold: true, color: accentColor });
 
-    applyLanguageFont(8).fillColor(mutedColor)
-       .text(
-         isTamil ? 'இந்த மதிப்பீடு கணினி மூலம் உருவாக்கப்பட்டது.' : 'This is a computer-generated quotation.',
-         50, footerY + 60, { align: 'center', width: doc.page.width - 100 }
-       );
+    write(
+      isTamil ? 'இந்த மதிப்பீடு கணினி மூலம் உருவாக்கப்பட்டது.' : 'This is a computer-generated quotation.',
+      50, footerY + 60, { size: 8, color: mutedColor, align: 'center', width: doc.page.width - 100 }
+    );
 
     doc.end();
   });
