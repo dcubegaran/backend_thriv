@@ -31,6 +31,7 @@ router.post('/manual', protect, requireRole('superadmin', 'admin', 'supervisor')
   try {
     const QuoteRequest = require('../models/QuoteRequest');
     const SqftPricing = require('../models/SqftPricing');
+    const { pickSqftRange } = require('../utils/sqftPricing');
     const { generateQuoteNumber } = require('../utils/quoteNumber');
 
     const numericSqft = Number(sqft);
@@ -38,12 +39,8 @@ router.post('/manual', protect, requireRole('superadmin', 'admin', 'supervisor')
       return res.status(400).json({ success: false, message: 'Sqft must be a positive number' });
     }
 
-    const pricingList = await SqftPricing.find({ active: true }).sort({ minSqft: 1, maxSqft: 1 });
-    const matched = pricingList.find(item => {
-      const min = Number(item.minSqft ?? 0);
-      const max = item.maxSqft === undefined || item.maxSqft === null || item.maxSqft === '' ? Number.MAX_SAFE_INTEGER : Number(item.maxSqft);
-      return numericSqft >= min && numericSqft <= max;
-    }) || pricingList[0];
+    const pricingList = await SqftPricing.find({ active: true });
+    const matched = pickSqftRange(pricingList, numericSqft);
 
     if (!matched) {
       return res.status(400).json({ success: false, message: 'No active sqft pricing configured' });

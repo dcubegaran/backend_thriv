@@ -8,19 +8,13 @@ const { generateQuoteNumber } = require('../utils/quoteNumber');
 const { applyOffers } = require('../utils/calculations');
 const { isValidObjectId, isValidPhone } = require('../utils/validate');
 const { generateQuotePDF } = require('../utils/pdfGenerator');
+const { pickSqftRange } = require('../utils/sqftPricing');
 
+// Rate for an area: the range it falls in (see utils/sqftPricing.js for what happens outside all ranges)
 const resolveSqftRateForValue = async (sqftValue) => {
-  const pricing = await SqftPricing.find({ active: true }).sort({ minSqft: 1, maxSqft: 1 });
-  if (!pricing.length) return { rate: 0, range: null };
-
-  const value = Number(sqftValue);
-  const match = pricing.find(item => {
-    const min = Number(item.minSqft ?? 0);
-    const max = item.maxSqft === undefined || item.maxSqft === null || item.maxSqft === '' ? Number.MAX_SAFE_INTEGER : Number(item.maxSqft);
-    return value >= min && value <= max;
-  });
-
-  const chosen = match || pricing[0];
+  const pricing = await SqftPricing.find({ active: true });
+  const chosen = pickSqftRange(pricing, sqftValue);
+  if (!chosen) return { rate: 0, range: null };
   return { rate: Number(chosen.ratePerSqft || 0), range: chosen };
 };
 
