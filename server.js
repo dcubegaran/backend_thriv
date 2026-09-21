@@ -3,6 +3,8 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const bcrypt = require('bcryptjs');
+const User = require('./models/User');
 
 const app = express();
 
@@ -53,9 +55,35 @@ app.use((err, req, res, next) => {
 
 // Connect to MongoDB and start
 const PORT = process.env.PORT || 5000;
+
+async function ensureInitialSuperadmin() {
+  const email = process.env.SUPERADMIN_INIT_EMAIL?.toLowerCase().trim();
+  const password = process.env.SUPERADMIN_INIT_PASSWORD;
+
+  if (!email || !password) {
+    console.warn('Initial superadmin was not checked: SUPERADMIN_INIT_EMAIL or SUPERADMIN_INIT_PASSWORD is missing.');
+    return;
+  }
+
+  const existingUser = await User.findOne({ email });
+  if (existingUser) {
+    console.log(`Initial superadmin already exists: ${email}`);
+    return;
+  }
+
+  await User.create({
+    name: 'Superadmin',
+    email,
+    passwordHash: await bcrypt.hash(password, 12),
+    role: 'superadmin',
+  });
+  console.log(`Initial superadmin created: ${email}`);
+}
+
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => {
+  .then(async () => {
     console.log('MongoDB connected');
+    await ensureInitialSuperadmin();
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   })
   .catch(err => {
