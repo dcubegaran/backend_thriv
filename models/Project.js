@@ -6,7 +6,10 @@ const projectSchema = new mongoose.Schema({
   sqft: { type: Number },
   descriptionEn: { type: String, default: '' },
   descriptionTa: { type: String, default: '' },
-  photos: [{ type: String }],
+  photos: [{ type: String }],        // cover photos (the first is shown on the website card)
+  gallery: [{ type: String }],       // extra photos shown in the project's View popup
+  yearOfCompletion: { type: String, default: '', trim: true },
+  units: { type: String, default: '', trim: true },
   completed: { type: Boolean, default: true },
 }, { timestamps: true });
 

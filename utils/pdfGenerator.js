@@ -11,12 +11,27 @@ function formatINR(amount) {
 }
 
 /**
- * Format date as "14 Sep 2026"
+ * Format date as "Mon, 14 Sep 2026"
  */
 function formatDate(date) {
   if (!date) return '';
   const d = new Date(date);
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  return d.toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+// Uploaded photos are stored as "/uploads/<file>". pdfkit can only embed JPEG and PNG,
+// so other formats (e.g. WEBP) are skipped. Returns a local file path or null.
+const SERVER_ROOT = path.join(__dirname, '..');
+function resolveUploadImage(url) {
+  if (!url || typeof url !== 'string' || !url.startsWith('/uploads/')) return null;
+  const file = path.basename(url);
+  if (!/\.(jpe?g|png)$/i.test(file)) return null;
+  const uploadDir = process.env.UPLOAD_DIR || 'uploads';
+  const candidates = [
+    path.join(SERVER_ROOT, uploadDir, file),
+    path.resolve(uploadDir, file),
+  ];
+  return candidates.find(p => fs.existsSync(p)) || null;
 }
 
 // ---- Fonts -----------------------------------------------------------------
@@ -58,7 +73,7 @@ async function generateQuotePDF(quoteData) {
 
     const {
       quoteNumber, date, customer, sqftRate, baseAmount,
-      offersApplied = [], finalAmount, terms, language, company = {}
+      offersApplied = [], finalAmount, terms, language, company = {}, offerShowcase = []
     } = quoteData;
 
     const isTamil = language === 'ta';
@@ -253,13 +268,16 @@ async function generateQuotePDF(quoteData) {
       : `Base Amount (${customer.sqft} sqft × ${formatINR(sqftRate || (baseAmount / customer.sqft))})`;
     drawRow(baseLabel, baseAmount);
 
+    // Every selected offer is listed; offers without a discount show as "Included"
     if (offersApplied && offersApplied.length > 0) {
       offersApplied.forEach(offer => {
+        const title = isTamil && offer.titleTa ? offer.titleTa : offer.titleEn;
         if (offer.discountApplied > 0) {
-          const offerLabel = isTamil && offer.titleTa
-            ? `${offer.titleTa} (${isTamil ? 'தள்ளுபடி' : 'Discount'})`
-            : `${offer.titleEn} (Discount)`;
-          drawRow(`  - ${offerLabel}`, -offer.discountApplied);
+          drawRow(`  - ${title} (${isTamil ? 'தள்ளுபடி' : 'Discount'})`, -offer.discountApplied);
+        } else {
+          write(`  - ${title} (${isTamil ? 'சலுகை' : 'Offer'})`, tableLeft, cy, { size: 10, width: colDesc - tableLeft });
+          write(isTamil ? 'சேர்க்கப்பட்டது' : 'Included', colDesc, cy, { size: 10, width: tableRight - colDesc, align: 'right', color: '#1a7a4a' });
+          cy += 18;
         }
       });
     }
@@ -272,6 +290,72 @@ async function generateQuotePDF(quoteData) {
     doc.moveTo(tableLeft, cy - 2).lineTo(tableRight, cy - 2).strokeColor(accentColor).lineWidth(2).stroke();
 
     cy += 20;
+
+    // ---- Offers with photos (public quotes) ----
+    if (offerShowcase && offerShowcase.length > 0) {
+      const pageBottom = () => doc.page.height - 110;
+      const newPageIfNeeded = (height) => {
+        if (cy + height > pageBottom()) {
+          doc.addPage();
+          cy = 50;
+        }
+      };
+      newPageIfNeeded(60);
+      doc.moveTo(50, cy).lineTo(doc.page.width - 50, cy).strokeColor(borderColor).lineWidth(1).stroke();
+      cy += 15;
+      write(isTamil ? 'எங்கள் சலுகைகள்' : 'Our Offers', 50, cy, { size: 11, bold: true, color: accentColor });
+      cy += 22;
+
+      // Each offer: title, discount, description, then its photos three to a row
+      const contentW = doc.page.width - 100;
+      const PER_ROW = 3;
+      const GAP = 10;
+      const imgW = (contentW - GAP * (PER_ROW - 1)) / PER_ROW;
+      const imgH = Math.round(imgW * 0.68);
+      offerShowcase.forEach((offer, offerIdx) => {
+        const title = isTamil && offer.titleTa ? offer.titleTa : offer.titleEn;
+        const description = isTamil && offer.descriptionTa ? offer.descriptionTa : offer.descriptionEn;
+        const discount = offer.discountType === 'fixed'
+          ? (isTamil ? `${formatINR(offer.discountValue)} தள்ளுபடி` : `${formatINR(offer.discountValue)} off`)
+          : offer.discountType === 'percentage'
+            ? (isTamil ? `${offer.discountValue}% தள்ளுபடி` : `${offer.discountValue}% off`)
+            : '';
+        const images = (offer.photos || []).map(resolveUploadImage).filter(Boolean);
+
+        // Keep the title with at least its first row of photos (or its text) on the same page
+        newPageIfNeeded(images.length ? imgH + 60 : 50);
+        cy = write(title, 50, cy, { size: 12, bold: true, color: darkColor, width: contentW });
+        if (discount) cy = write(discount, 50, cy + 2, { size: 10, bold: true, color: '#1a7a4a' });
+        if (description) cy = write(description, 50, cy + 4, { size: 9.5, color: mutedColor, width: contentW, lineGap: 2 });
+        cy += 10;
+
+        for (let i = 0; i < images.length; i += PER_ROW) {
+          newPageIfNeeded(imgH + 6);
+          images.slice(i, i + PER_ROW).forEach((file, col) => {
+            const x = 50 + col * (imgW + GAP);
+            try {
+              doc.save();
+              doc.roundedRect(x, cy, imgW, imgH, 6).clip();
+              doc.image(file, x, cy, { cover: [imgW, imgH], align: 'center', valign: 'center' });
+              doc.restore();
+            } catch (e) {
+              doc.restore();
+              // Unreadable image: leave its cell empty
+            }
+          });
+          cy += imgH + GAP;
+        }
+
+        // Divider between offers
+        if (offerIdx < offerShowcase.length - 1) {
+          cy += 4;
+          doc.moveTo(50, cy).lineTo(doc.page.width - 50, cy).strokeColor('#e5e7eb').lineWidth(0.8).stroke();
+          cy += 14;
+        } else {
+          cy += 8;
+        }
+      });
+    }
 
     // ---- Terms & Conditions ----
     if (terms && terms.trim()) {

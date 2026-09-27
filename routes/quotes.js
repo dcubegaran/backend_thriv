@@ -5,7 +5,7 @@ const { protect, requireRole } = require('../middleware/auth');
 const {
   submitPublicQuote, generatePublicPDF,
   getQuotes, getQuote, updateQuoteStatus, generateFinalQuote,
-  getGeneratedQuotes, downloadGeneratedPDF
+  getGeneratedQuotes, downloadGeneratedPDF, deleteQuote, deleteGeneratedQuote
 } = require('../controllers/quoteController');
 
 // Rate limiter for public quote submission
@@ -37,6 +37,14 @@ router.post('/manual', protect, requireRole('superadmin', 'admin', 'supervisor')
     const numericSqft = Number(sqft);
     if (Number.isNaN(numericSqft) || numericSqft < 1) {
       return res.status(400).json({ success: false, message: 'Sqft must be a positive number' });
+    }
+
+    const { sameNameRegex } = require('../utils/validate');
+    const duplicate = await QuoteRequest.exists({
+      name: sameNameRegex(name), phone: String(phone).trim(), sqft: numericSqft,
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'A quote for this customer, phone and sqft already exists' });
     }
 
     const pricingList = await SqftPricing.find({ active: true });
@@ -71,5 +79,7 @@ router.put('/:id/status', protect, requireRole('superadmin', 'admin', 'superviso
 router.post('/:id/generate', protect, requireRole('superadmin', 'admin', 'supervisor'), generateFinalQuote);
 router.get('/:id/generated', protect, requireRole('superadmin', 'admin', 'supervisor'), getGeneratedQuotes);
 router.get('/:id/generated/:genId/pdf', protect, requireRole('superadmin', 'admin', 'supervisor'), downloadGeneratedPDF);
+router.delete('/:id', protect, requireRole('superadmin', 'admin'), deleteQuote);
+router.delete('/:id/generated/:genId', protect, requireRole('superadmin', 'admin'), deleteGeneratedQuote);
 
 module.exports = router;

@@ -10,8 +10,8 @@ const Credit = require('../models/Credit');
 const Material = require('../models/Material');
 const ContractType = require('../models/ContractType');
 const User = require('../models/User');
-const { isValidObjectId } = require('../utils/validate');
-const { generateSiteReportPDF } = require('../utils/siteReportPdf');
+const { isValidObjectId, sameNameRegex, sameDayRange } = require('../utils/validate');
+const { generateSiteReportPDF, generateTablePDF } = require('../utils/siteReportPdf');
 const {
   calcLabourTotal, calcMaterialTotal, calcCurrentSpend,
   calcRemainingAmount, calcRemainingBudget, calcSiteProfit, shouldShowWarning
@@ -35,6 +35,28 @@ function canAccessSite(user, site) {
     });
   }
   return false;
+}
+
+// Supervisors may only enter dates in the current week (Sunday to Saturday), up to today (no future dates).
+// Days are counted in the business timezone so the rule matches the date picker in India.
+const BUSINESS_TZ = process.env.APP_TIMEZONE || 'Asia/Kolkata';
+const todayInBusinessTz = () => new Date().toLocaleDateString('en-CA', { timeZone: BUSINESS_TZ }); // YYYY-MM-DD
+const shiftDay = (ymd, days) => {
+  const d = new Date(`${ymd}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+// Returns an error message when the entry date is not allowed for this user, otherwise null
+function checkEntryDate(user, date) {
+  if (user.role !== 'supervisor') return null;
+  const today = todayInBusinessTz();
+  const day = date ? new Date(date).toISOString().slice(0, 10) : today;
+  if (Number.isNaN(new Date(day).getTime())) return 'Invalid date';
+  const weekStart = shiftDay(today, -new Date(`${today}T00:00:00.000Z`).getUTCDay()); // this week's Sunday
+  if (day > today) return 'Future dates cannot be added';
+  if (day < weekStart) return 'Supervisors can only add entries for the current week (Sunday to Saturday)';
+  return null;
 }
 
 // Compute spend totals for a site
@@ -223,16 +245,68 @@ exports.downloadSiteReport = async (req, res) => {
   }
 };
 
+// POST /api/sites/:id/table-pdf - PDF of an entries tab, with the rows the page is showing
+// body: { title, subtitle, meta: [..], headers: [..], rows: [[..]], numeric: [col], footer: [..] | null, filename }
+exports.downloadTablePdf = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid site ID' });
+    }
+    const site = await Site.findById(req.params.id);
+    if (!site) return res.status(404).json({ success: false, message: 'Site not found' });
+    if (!canAccessSite(req.user, site)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const { title, subtitle, meta, headers, rows, numeric, footer, filename } = req.body || {};
+    const cell = v => String(v ?? '').slice(0, 500);
+    if (!Array.isArray(headers) || headers.length === 0 || headers.length > 12 || !Array.isArray(rows) || rows.length > 5000) {
+      return res.status(400).json({ success: false, message: 'Invalid table' });
+    }
+    const width = headers.length;
+    const pdf = await generateTablePDF({
+      siteName: site.siteName,
+      title: cell(title),
+      subtitle: cell(subtitle),
+      meta: Array.isArray(meta) ? meta.slice(0, 5).map(cell) : [],
+      headers: headers.map(cell),
+      rows: rows.map(r => Array.from({ length: width }, (_, i) => cell(Array.isArray(r) ? r[i] : ''))),
+      numeric: Array.isArray(numeric) ? numeric.filter(n => Number.isInteger(n)) : [],
+      footer: Array.isArray(footer) ? Array.from({ length: width }, (_, i) => cell(footer[i])) : null,
+    });
+    const safeName = String(filename || 'entries').replace(/[^\w.-]+/g, '_').slice(0, 120);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${safeName}.pdf"`,
+      'Content-Length': pdf.length,
+    });
+    res.send(pdf);
+  } catch (err) {
+    console.error('Table PDF failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to generate PDF' });
+  }
+};
+
 // POST /api/sites
 exports.createSite = async (req, res) => {
   try {
-    const { siteName, location, ownerName, ownerPhone, sqft, totalValuation,
-      amountReceived, startDate, status, assignedSupervisors } = req.body;
-    if (!siteName || !location || !ownerName || !ownerPhone || totalValuation === undefined) {
+    const { siteName, location, ownerName, ownerPhone, sqft, sqftRate,
+      amountReceived, startDate, assignedSupervisors } = req.body;
+    // Total valuation defaults to sqft x sqft rate, but the form lets it be edited
+    let { totalValuation } = req.body;
+    if ((totalValuation === undefined || totalValuation === '') && sqft && sqftRate) {
+      totalValuation = Number(sqft) * Number(sqftRate);
+    }
+    if (!siteName || !location || !ownerName || !ownerPhone || totalValuation === undefined || totalValuation === '') {
       return res.status(400).json({ success: false, message: 'Required fields: siteName, location, ownerName, ownerPhone, totalValuation' });
     }
     if (isNaN(totalValuation) || Number(totalValuation) < 0) {
       return res.status(400).json({ success: false, message: 'Total valuation must be a non-negative number' });
+    }
+    if (sqftRate !== undefined && sqftRate !== '' && (isNaN(sqftRate) || Number(sqftRate) < 0)) {
+      return res.status(400).json({ success: false, message: 'Sqft rate must be a non-negative number' });
+    }
+    if (await Site.exists({ siteName: sameNameRegex(siteName) })) {
+      return res.status(400).json({ success: false, message: 'A site with this name already exists' });
     }
 
     // Build assigned arrays based on role
@@ -241,8 +315,6 @@ exports.createSite = async (req, res) => {
     if (req.user.role === 'admin') {
       admins = [req.user._id];
       supervisors = Array.isArray(assignedSupervisors) ? assignedSupervisors : [];
-    } else if (req.user.role === 'supervisor') {
-      supervisors = [req.user._id];
     } else if (req.user.role === 'superadmin') {
       // Superadmin assigns via "Assign Users" modal after creation
       admins = Array.isArray(req.body.assignedAdmins) ? req.body.assignedAdmins : [];
@@ -252,10 +324,11 @@ exports.createSite = async (req, res) => {
     const site = await Site.create({
       siteName, location, ownerName, ownerPhone,
       sqft: Number(sqft) || 0,
+      sqftRate: Number(sqftRate) || 0,
       totalValuation: Number(totalValuation),
       amountReceived: Number(amountReceived) || 0,
       startDate: startDate ? new Date(startDate) : new Date(),
-      status: status || 'active',
+      status: 'active',
       createdBy: req.user._id,
       assignedAdmins: admins,
       assignedSupervisors: supervisors,
@@ -279,7 +352,7 @@ exports.updateSite = async (req, res) => {
     }
 
     // Only superadmin can change assignments
-    const allowedFields = ['siteName', 'location', 'ownerName', 'ownerPhone', 'sqft',
+    const allowedFields = ['siteName', 'location', 'ownerName', 'ownerPhone', 'sqft', 'sqftRate',
       'totalValuation', 'amountReceived', 'startDate', 'endDate', 'status'];
     if (req.user.role === 'superadmin') {
       allowedFields.push('assignedAdmins', 'assignedSupervisors');
@@ -289,11 +362,67 @@ exports.updateSite = async (req, res) => {
     allowedFields.forEach(f => {
       if (req.body[f] !== undefined) updates[f] = req.body[f];
     });
+    if (updates.siteName !== undefined
+      && await Site.exists({ _id: { $ne: site._id }, siteName: sameNameRegex(updates.siteName) })) {
+      return res.status(400).json({ success: false, message: 'A site with this name already exists' });
+    }
 
     const updated = await Site.findByIdAndUpdate(req.params.id, updates, { new: true });
     res.json({ success: true, site: updated });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to update site' });
+  }
+};
+
+// POST /api/sites/:id/valuation   body: { amount, remarks } - adds to the total valuation
+exports.addValuation = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid site ID' });
+    }
+    const amount = Number(req.body.amount);
+    const remarks = String(req.body.remarks || '').trim();
+    if (!remarks || req.body.amount === undefined || req.body.amount === '' || !Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, message: 'Remarks and a valuation amount greater than 0 are required' });
+    }
+    const site = await Site.findById(req.params.id);
+    if (!site) return res.status(404).json({ success: false, message: 'Site not found' });
+    if (!canAccessSite(req.user, site)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    site.totalValuation = Number(site.totalValuation || 0) + amount;
+    site.valuationAdditions.push({ amount, remarks, addedBy: req.user._id, date: new Date() });
+    await site.save();
+    res.status(201).json({ success: true, site });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to add valuation' });
+  }
+};
+
+// DELETE /api/sites/:id - removes the site and everything recorded against it
+exports.deleteSite = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid site ID' });
+    }
+    const site = await Site.findById(req.params.id);
+    if (!site) return res.status(404).json({ success: false, message: 'Site not found' });
+    if (!canAccessSite(req.user, site)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const siteId = site._id;
+    await Promise.all([
+      LabourLog.deleteMany({ siteId }),
+      Attendance.deleteMany({ siteId }),
+      MaterialLog.deleteMany({ siteId }),
+      UnexpectedCost.deleteMany({ siteId }),
+      SiteContract.deleteMany({ siteId }),
+      Credit.deleteMany({ siteId }),
+    ]);
+    await site.deleteOne();
+    res.json({ success: true, message: 'Site deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete site' });
   }
 };
 
@@ -319,6 +448,12 @@ exports.addLabour = async (req, res) => {
     const worker = await Worker.findById(workerId);
     if (!labourType) return res.status(404).json({ success: false, message: 'Labour type not found' });
     if (!worker) return res.status(404).json({ success: false, message: 'Worker not found' });
+    const dateError = checkEntryDate(req.user, date);
+    if (dateError) return res.status(400).json({ success: false, message: dateError });
+    const entryDate = date ? new Date(date) : new Date();
+    if (await LabourLog.exists({ siteId: site._id, workerId, date: sameDayRange(entryDate) })) {
+      return res.status(400).json({ success: false, message: 'This worker is already added for this date' });
+    }
 
     const rateAtTime = rateOverride !== undefined && rateOverride !== null && rateOverride !== ''
       ? Number(rateOverride) : labourType.ratePerDay;
@@ -328,7 +463,7 @@ exports.addLabour = async (req, res) => {
 
     const log = await LabourLog.create({
       siteId: site._id,
-      date: date ? new Date(date) : new Date(),
+      date: entryDate,
       labourTypeId,
       workerId,
       workerNameSnapshot: worker.name,
@@ -429,13 +564,23 @@ exports.addMaterial = async (req, res) => {
     }
     const material = await Material.findById(materialId);
     if (!material) return res.status(404).json({ success: false, message: 'Material not found' });
+    const dateError = checkEntryDate(req.user, date);
+    if (dateError) return res.status(400).json({ success: false, message: dateError });
 
     const discountNum = Number(discount) || 0;
     const totalAmount = calcMaterialTotal(Number(quantity), Number(rateAtTime), discountNum);
+    const entryDate = date ? new Date(date) : new Date();
+    const duplicate = await MaterialLog.exists({
+      siteId: site._id, materialId, unit, quantity: Number(quantity),
+      rateAtTime: Number(rateAtTime), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'The same material entry already exists for this date' });
+    }
 
     const log = await MaterialLog.create({
       siteId: site._id,
-      date: date ? new Date(date) : new Date(),
+      date: entryDate,
       materialId,
       materialNameSnapshot: material.name,
       unit,
@@ -488,12 +633,21 @@ exports.addUnexpectedCost = async (req, res) => {
     if (isNaN(amount) || Number(amount) < 0) {
       return res.status(400).json({ success: false, message: 'Amount must be a non-negative number' });
     }
+    const dateError = checkEntryDate(req.user, date);
+    if (dateError) return res.status(400).json({ success: false, message: dateError });
+    const entryDate = date ? new Date(date) : new Date();
+    const duplicate = await UnexpectedCost.exists({
+      siteId: site._id, name: sameNameRegex(name), amount: Number(amount), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'The same unexpected cost already exists for this date' });
+    }
     const cost = await UnexpectedCost.create({
       siteId: site._id,
-      name,
+      name: String(name).trim(),
       remarks: remarks || '',
       amount: Number(amount),
-      date: date ? new Date(date) : new Date(),
+      date: entryDate,
       createdBy: req.user._id,
     });
     res.status(201).json({ success: true, unexpectedCost: cost });
@@ -541,16 +695,25 @@ exports.addContract = async (req, res) => {
       const ct = await ContractType.findById(contractTypeId);
       if (ct) nameSnapshot = ct.name;
     }
-    if (!nameSnapshot) {
+    if (!nameSnapshot || !String(nameSnapshot).trim()) {
       return res.status(400).json({ success: false, message: 'Contract type name required' });
+    }
+    const dateError = checkEntryDate(req.user, date);
+    if (dateError) return res.status(400).json({ success: false, message: dateError });
+    const entryDate = date ? new Date(date) : new Date();
+    const duplicate = await SiteContract.exists({
+      siteId: site._id, contractTypeNameSnapshot: sameNameRegex(nameSnapshot), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'This contract is already added for this date' });
     }
 
     const contract = await SiteContract.create({
       siteId: site._id,
       contractTypeId: contractTypeId && isValidObjectId(contractTypeId) ? contractTypeId : undefined,
-      contractTypeNameSnapshot: nameSnapshot,
+      contractTypeNameSnapshot: String(nameSnapshot).trim(),
       priceAtTime: Number(priceAtTime),
-      date: date ? new Date(date) : new Date(),
+      date: entryDate,
       createdBy: req.user._id,
     });
     res.status(201).json({ success: true, contract });

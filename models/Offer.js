@@ -10,6 +10,8 @@ const offerSchema = new mongoose.Schema({
   discountType: { type: String, enum: ['none', 'fixed', 'percentage'], default: 'none' },
   discountValue: { type: Number, default: 0, min: 0 },
   active: { type: Boolean, default: true },
+  // Chosen by the superadmin on the Offers page; only these (and active) appear on the public website
+  showOnWebsite: { type: Boolean, default: true },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Offer', offerSchema);

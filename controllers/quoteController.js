@@ -9,6 +9,7 @@ const { applyOffers } = require('../utils/calculations');
 const { isValidObjectId, isValidPhone } = require('../utils/validate');
 const { generateQuotePDF } = require('../utils/pdfGenerator');
 const { pickSqftRange } = require('../utils/sqftPricing');
+const { PUBLIC_OFFER_QUERY } = require('./offerController');
 
 // Rate for an area: the range it falls in (see utils/sqftPricing.js for what happens outside all ranges)
 const resolveSqftRateForValue = async (sqftValue) => {
@@ -16,6 +17,34 @@ const resolveSqftRateForValue = async (sqftValue) => {
   const chosen = pickSqftRange(pricing, sqftValue);
   if (!chosen) return { rate: 0, range: null };
   return { rate: Number(chosen.ratePerSqft || 0), range: chosen };
+};
+
+// Loads active offers in the order their ids were selected (offers are applied in that order)
+// websiteOnly: public quotes may only use offers shown on the website
+const loadOffersInOrder = async (ids, { websiteOnly = false } = {}) => {
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+  const validIds = ids.filter(isValidObjectId);
+  const found = await Offer.find({ _id: { $in: validIds }, ...(websiteOnly ? PUBLIC_OFFER_QUERY : { active: true }) });
+  const byId = new Map(found.map(o => [o._id.toString(), o]));
+  const seen = new Set();
+  return validIds
+    .map(id => String(id))
+    .filter(id => byId.has(id) && !seen.has(id) && seen.add(id))
+    .map(id => byId.get(id));
+};
+
+// The offers shown on the website, with their photos, for the public quote PDF
+const loadOfferShowcase = async () => {
+  const offers = await Offer.find(PUBLIC_OFFER_QUERY).sort({ createdAt: -1 });
+  return offers.map(o => ({
+    titleEn: o.titleEn,
+    titleTa: o.titleTa,
+    descriptionEn: o.descriptionEn,
+    descriptionTa: o.descriptionTa,
+    discountType: o.discountType,
+    discountValue: o.discountValue,
+    photos: (o.photos && o.photos.length ? o.photos : (o.photo ? [o.photo] : [])),
+  }));
 };
 
 // POST /api/quotes/public - public quote request
@@ -45,13 +74,7 @@ exports.submitPublicQuote = async (req, res) => {
     const baseAmount = Number(sqft) * sqftRate;
 
     // Apply selected offers
-    let selectedOffers = [];
-    if (selectedOfferIds && selectedOfferIds.length > 0) {
-      selectedOffers = await Offer.find({
-        _id: { $in: selectedOfferIds },
-        active: true,
-      });
-    }
+    const selectedOffers = await loadOffersInOrder(selectedOfferIds, { websiteOnly: true });
     const { finalAmount, appliedOffers } = applyOffers(baseAmount, selectedOffers);
 
     const quoteNumber = await generateQuoteNumber(QuoteRequest);
@@ -63,6 +86,7 @@ exports.submitPublicQuote = async (req, res) => {
       phone,
       remarks: remarks || '',
       estimatedAmount: finalAmount,
+      offersApplied: appliedOffers,
       source: 'website',
     });
 
@@ -98,7 +122,10 @@ exports.generatePublicPDF = async (req, res) => {
     }
 
     const baseAmount = quoteRequest.sqft * sqftRate;
-    const companyContent = await WebsiteContent.findOne({ section: 'companyInformation' });
+    const [companyContent, offerShowcase] = await Promise.all([
+      WebsiteContent.findOne({ section: 'companyInformation' }),
+      loadOfferShowcase(),
+    ]);
 
     const quoteData = {
       quoteNumber: quoteRequest.quoteNumber,
@@ -109,10 +136,12 @@ exports.generatePublicPDF = async (req, res) => {
         phone: quoteRequest.phone,
         sqft: quoteRequest.sqft,
       },
+      sqftRate,
       baseAmount,
-      offersApplied: [],
+      offersApplied: quoteRequest.offersApplied || [],
       finalAmount: quoteRequest.estimatedAmount,
-      terms: null, // Public quotes don't include terms
+      terms: null, // Public quotes don't include terms, but list every offer with its photos
+      offerShowcase,
       language,
       company: companyContent ? companyContent.data : {},
     };
@@ -207,11 +236,8 @@ exports.generateFinalQuote = async (req, res) => {
 
     const baseAmount = quoteRequest.sqft * sqftRateAtGeneration;
 
-    // Snapshot selected offers
-    let selectedOffers = [];
-    if (selectedOfferIds && selectedOfferIds.length > 0) {
-      selectedOffers = await Offer.find({ _id: { $in: selectedOfferIds }, active: true });
-    }
+    // Snapshot selected offers, in the order they were ticked
+    const selectedOffers = await loadOffersInOrder(selectedOfferIds);
     const { finalAmount, appliedOffers } = applyOffers(baseAmount, selectedOffers);
 
     // Snapshot current terms (if requested)
@@ -321,5 +347,34 @@ exports.downloadGeneratedPDF = async (req, res) => {
     res.send(pdfBuffer);
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to generate PDF' });
+  }
+};
+
+// DELETE /api/quotes/:id - removes the quote request and its generated final quotes
+exports.deleteQuote = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const quote = await QuoteRequest.findByIdAndDelete(req.params.id);
+    if (!quote) return res.status(404).json({ success: false, message: 'Quote not found' });
+    await GeneratedQuote.deleteMany({ quoteRequestId: quote._id });
+    res.json({ success: true, message: 'Quote deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete quote' });
+  }
+};
+
+// DELETE /api/quotes/:id/generated/:genId - removes one generated final quote
+exports.deleteGeneratedQuote = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id) || !isValidObjectId(req.params.genId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const generated = await GeneratedQuote.findOneAndDelete({ _id: req.params.genId, quoteRequestId: req.params.id });
+    if (!generated) return res.status(404).json({ success: false, message: 'Generated quote not found' });
+    res.json({ success: true, message: 'Generated quote deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete generated quote' });
   }
 };

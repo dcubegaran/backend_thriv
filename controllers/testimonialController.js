@@ -1,5 +1,5 @@
 const Testimonial = require('../models/Testimonial');
-const { isValidObjectId } = require('../utils/validate');
+const { isValidObjectId, sameNameRegex } = require('../utils/validate');
 
 exports.getTestimonials = async (req, res) => {
   try {
@@ -15,6 +15,9 @@ exports.createTestimonial = async (req, res) => {
     const { customerName, location, textEn, textTa, photo } = req.body;
     if (!customerName || !location || !textEn) {
       return res.status(400).json({ success: false, message: 'Name, location and text required' });
+    }
+    if (await Testimonial.exists({ customerName: sameNameRegex(customerName), textEn: sameNameRegex(textEn) })) {
+      return res.status(400).json({ success: false, message: 'This testimonial already exists' });
     }
     const t = await Testimonial.create({ customerName, location, textEn, textTa, photo });
     res.status(201).json({ success: true, testimonial: t });

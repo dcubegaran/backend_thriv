@@ -33,7 +33,7 @@ function formatAmount(amount) {
 function formatDate(date) {
   if (!date) return '-';
   return new Date(date).toLocaleDateString('en-IN', {
-    day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC',
+    weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC',
   });
 }
 
@@ -345,4 +345,150 @@ function generateSiteReportPDF(data) {
   });
 }
 
-module.exports = { generateSiteReportPDF };
+/**
+ * Generic table PDF (the entries tabs on the site page: labour, material, unexpected costs, contracts).
+ * The page sends the rows exactly as shown on screen, already formatted.
+ * data: { company, siteName, title, subtitle, meta: [string], headers: [string], rows: [[string]],
+ *         numeric: [columnIndex], footer: [string] | null }
+ */
+function generateTablePDF(data) {
+  return new Promise((resolve, reject) => {
+    const {
+      company = 'Balu Hari Builders', siteName = '', title = '', subtitle = '', meta = [],
+      headers = [], rows = [], numeric = [], footer = null,
+    } = data;
+
+    // Wide tables go landscape so columns stay readable
+    const doc = new PDFDocument({
+      margin: PAGE_MARGIN - 14,
+      size: 'A4',
+      layout: headers.length > 6 ? 'landscape' : 'portrait',
+      bufferPages: true,
+      info: { Title: `${siteName} - ${title}`, Author: company },
+    });
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const margin = PAGE_MARGIN - 14;
+    const left = margin;
+    const contentWidth = doc.page.width - margin * 2;
+    const bottomLimit = doc.page.height - 56;
+    let y = margin;
+
+    const latinFont = bold => (bold ? 'Helvetica-Bold' : 'Helvetica');
+    const tamilFont = bold => (bold ? tamilBold : tamilRegular);
+    // Helvetica has no rupee glyph
+    const clean = value => String(value ?? '').replace(/₹\s?/g, 'Rs. ');
+
+    const text = (value, x, yPos, { size = 10, bold = false, color = COLORS.dark, ...options } = {}) => {
+      const str = clean(value);
+      doc.fillColor(color);
+      if (!hasTamilFont || !TAMIL_RE.test(str)) {
+        doc.font(latinFont(bold)).fontSize(size).text(str, x, yPos, options);
+        return;
+      }
+      const runs = str.match(TAMIL_SPLIT_RE);
+      runs.forEach((run, i) => {
+        const isLast = i === runs.length - 1;
+        doc.font(TAMIL_RE.test(run) ? tamilFont(bold) : latinFont(bold)).fontSize(size);
+        if (i === 0) doc.text(run, x, yPos, { ...options, continued: !isLast });
+        else doc.text(run, { ...options, continued: !isLast });
+      });
+    };
+    const fontFor = (str, bold) => (hasTamilFont && TAMIL_RE.test(str) ? tamilFont(bold) : latinFont(bold));
+    const measureHeight = (value, width, size, bold = false) => {
+      const str = clean(value);
+      doc.font(fontFor(str, bold)).fontSize(size);
+      return doc.heightOfString(str || ' ', { width });
+    };
+    const measureWidth = (value, size, bold = false) => {
+      const str = clean(value);
+      doc.font(fontFor(str, bold)).fontSize(size);
+      return doc.widthOfString(str);
+    };
+    const hr = (yPos, color = COLORS.border, width = 1) => {
+      doc.moveTo(left, yPos).lineTo(left + contentWidth, yPos).strokeColor(color).lineWidth(width).stroke();
+    };
+
+    // Column widths follow the content, capped so one long column can't squeeze the rest
+    const FONT = 9.5;
+    const PAD = 8;
+    const natural = headers.map((h, i) => {
+      const cells = [h, ...rows.map(r => r[i]), ...(footer ? [footer[i]] : [])];
+      const widest = Math.max(...cells.map(c => measureWidth(c, FONT, true)));
+      return Math.min(Math.max(widest + PAD, 50), 220);
+    });
+    const scale = contentWidth / natural.reduce((a, b) => a + b, 0);
+    const widths = natural.map(w => w * scale);
+    const xs = widths.map((_, i) => left + widths.slice(0, i).reduce((a, b) => a + b, 0));
+    const align = i => (numeric.includes(i) ? 'right' : 'left');
+
+    const tableHeader = () => {
+      const height = Math.max(...headers.map((h, i) => measureHeight(h.toUpperCase(), widths[i] - PAD, 8.5, true))) + 12;
+      doc.rect(left, y, contentWidth, height).fill(COLORS.headBg);
+      headers.forEach((h, i) => text(h.toUpperCase(), xs[i] + PAD / 2, y + 6, { size: 8.5, bold: true, color: COLORS.accent, width: widths[i] - PAD, align: align(i) }));
+      y += height;
+    };
+
+    // ---- Heading ----
+    doc.rect(0, 0, doc.page.width, 78).fill(COLORS.band);
+    text(company, left, 18, { size: 18, bold: true, color: COLORS.accent, width: contentWidth, align: 'center' });
+    text(title.toUpperCase(), left, 44, { size: 11, bold: true, color: COLORS.muted, width: contentWidth, align: 'center' });
+    hr(84, COLORS.accent, 2);
+    y = 96;
+    text(siteName, left, y, { size: 13, bold: true, width: contentWidth });
+    y += 20;
+    [subtitle, ...meta].filter(Boolean).forEach(line => {
+      text(line, left, y, { size: 9.5, color: COLORS.muted, width: contentWidth });
+      y += measureHeight(line, contentWidth, 9.5) + 3;
+    });
+    y += 10;
+
+    // ---- Table ----
+    tableHeader();
+    if (rows.length === 0) {
+      text('No entries', left, y + 10, { size: 10, color: COLORS.muted, width: contentWidth, align: 'center' });
+      y += 34;
+    }
+    rows.forEach((row, rIdx) => {
+      const height = Math.max(...row.map((c, i) => measureHeight(c, widths[i] - PAD, FONT))) + 10;
+      if (y + height > bottomLimit) {
+        doc.addPage();
+        y = margin;
+        tableHeader();
+      }
+      if (rIdx % 2 === 1) doc.rect(left, y, contentWidth, height).fill('#f8fafc');
+      row.forEach((c, i) => text(c, xs[i] + PAD / 2, y + 5, { size: FONT, width: widths[i] - PAD, align: align(i) }));
+      y += height;
+      hr(y, '#e5e5e5', 0.5);
+    });
+    if (footer) {
+      const height = Math.max(...footer.map((c, i) => measureHeight(c, widths[i] - PAD, FONT, true))) + 12;
+      if (y + height > bottomLimit) {
+        doc.addPage();
+        y = margin;
+      }
+      doc.rect(left, y, contentWidth, height).fill(COLORS.band);
+      footer.forEach((c, i) => text(c, xs[i] + PAD / 2, y + 6, { size: FONT, bold: true, color: COLORS.accent, width: widths[i] - PAD, align: align(i) }));
+      y += height;
+    }
+
+    // ---- Footer on every page ----
+    const pages = doc.bufferedPageRange();
+    for (let i = pages.start; i < pages.start + pages.count; i++) {
+      doc.switchToPage(i);
+      doc.page.margins.bottom = 0;
+      const footerY = doc.page.height - 30;
+      hr(footerY - 8, COLORS.border, 0.5);
+      text(`${company}  |  ${siteName}  |  ${title}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth * 0.75, lineBreak: false });
+      text(`Page ${i + 1} of ${pages.count}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth, align: 'right', lineBreak: false });
+    }
+
+    doc.end();
+  });
+}
+
+module.exports = { generateSiteReportPDF, generateTablePDF };
+

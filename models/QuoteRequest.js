@@ -8,6 +8,16 @@ const quoteRequestSchema = new mongoose.Schema({
   phone: { type: String, required: true, trim: true },
   remarks: { type: String, default: '' },
   estimatedAmount: { type: Number, default: 0 },
+  // Offers the customer picked on the website, with the discount each one gave
+  offersApplied: [{
+    _id: false,
+    offerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Offer' },
+    titleEn: String,
+    titleTa: String,
+    discountType: String,
+    discountValue: Number,
+    discountApplied: Number,
+  }],
   source: {
     type: String,
     enum: ['website', 'manual'],

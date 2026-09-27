@@ -1,4 +1,5 @@
 const PersonalExpense = require('../models/PersonalExpense');
+const { sameNameRegex, sameDayRange } = require('../utils/validate');
 
 // GET /api/personal-expenses - superadmin and admin only
 exports.getPersonalExpenses = async (req, res) => {
@@ -54,11 +55,18 @@ exports.addPersonalExpense = async (req, res) => {
     if (isNaN(amount) || Number(amount) < 0) {
       return res.status(400).json({ success: false, message: 'Amount must be a non-negative number' });
     }
+    const entryDate = date ? new Date(date) : new Date();
+    const duplicate = await PersonalExpense.exists({
+      name: sameNameRegex(name), reason: sameNameRegex(reason), amount: Number(amount), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'The same expense already exists for this date' });
+    }
     const expense = await PersonalExpense.create({
       name,
       reason,
       amount: Number(amount),
-      date: date ? new Date(date) : new Date(),
+      date: entryDate,
       addedBy: req.user._id,
     });
     res.status(201).json({ success: true, expense });

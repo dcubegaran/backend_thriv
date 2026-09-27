@@ -1,6 +1,6 @@
 const Credit = require('../models/Credit');
 const Site = require('../models/Site');
-const { isValidObjectId } = require('../utils/validate');
+const { isValidObjectId, sameNameRegex, sameDayRange } = require('../utils/validate');
 
 // Helper
 function canAccessSite(user, site) {
@@ -50,11 +50,18 @@ exports.createCredit = async (req, res) => {
     if (!canAccessSite(req.user, site)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
+    const entryDate = date ? new Date(date) : new Date();
+    const duplicate = await Credit.exists({
+      siteId, shopName: sameNameRegex(shopName), amount: Number(amount), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'The same credit already exists for this date' });
+    }
     const credit = await Credit.create({
       siteId,
-      shopName,
+      shopName: String(shopName).trim(),
       amount: Number(amount),
-      date: date ? new Date(date) : new Date(),
+      date: entryDate,
       createdBy: req.user._id,
     });
     res.status(201).json({ success: true, credit });
