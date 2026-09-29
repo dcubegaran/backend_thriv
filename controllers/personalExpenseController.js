@@ -1,5 +1,5 @@
 const PersonalExpense = require('../models/PersonalExpense');
-const { sameNameRegex, sameDayRange } = require('../utils/validate');
+const { isValidObjectId, sameNameRegex, sameDayRange } = require('../utils/validate');
 
 // GET /api/personal-expenses - superadmin and admin only
 exports.getPersonalExpenses = async (req, res) => {
@@ -72,5 +72,19 @@ exports.addPersonalExpense = async (req, res) => {
     res.status(201).json({ success: true, expense });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to add personal expense' });
+  }
+};
+
+// DELETE /api/personal-expenses/:id - superadmin and admin only
+exports.deletePersonalExpense = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const expense = await PersonalExpense.findByIdAndDelete(req.params.id);
+    if (!expense) return res.status(404).json({ success: false, message: 'Expense not found' });
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete personal expense' });
   }
 };
