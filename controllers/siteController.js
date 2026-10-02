@@ -3,6 +3,7 @@ const LabourLog = require('../models/LabourLog');
 const MaterialLog = require('../models/MaterialLog');
 const UnexpectedCost = require('../models/UnexpectedCost');
 const SiteContract = require('../models/SiteContract');
+const ExtraExpense = require('../models/ExtraExpense');
 const Attendance = require('../models/Attendance');
 const LabourType = require('../models/LabourType');
 const Worker = require('../models/Worker');
@@ -59,22 +60,44 @@ function checkEntryDate(user, date) {
   return null;
 }
 
+// Supervisors may only delete entries dated in the current week (Sunday to Saturday)
+function checkDeleteDate(user, date) {
+  if (user.role !== 'supervisor') return null;
+  const today = todayInBusinessTz();
+  const day = new Date(date).toISOString().slice(0, 10);
+  const weekStart = shiftDay(today, -new Date(`${today}T00:00:00.000Z`).getUTCDay());
+  const weekEnd = shiftDay(weekStart, 6);
+  if (day < weekStart || day > weekEnd) return 'Supervisors can only delete entries from the current week (Sunday to Saturday)';
+  return null;
+}
+
 // Compute spend totals for a site
 async function getSiteSpend(siteId) {
-  const [labourLogs, materialLogs, unexpectedCosts] = await Promise.all([
+  const [labourLogs, materialLogs, unexpectedCosts, contracts, extraExpenses] = await Promise.all([
     LabourLog.find({ siteId }),
     MaterialLog.find({ siteId }),
     UnexpectedCost.find({ siteId }),
+    SiteContract.find({ siteId }),
+    ExtraExpense.find({ siteId }),
   ]);
   const labourTotal = labourLogs.reduce((sum, l) => sum + l.totalAmount, 0);
   const materialTotal = materialLogs.reduce((sum, m) => sum + m.totalAmount, 0);
   const unexpectedTotal = unexpectedCosts.reduce((sum, u) => sum + u.amount, 0);
+  const contractTotal = contracts.reduce((sum, c) => sum + c.priceAtTime, 0);
+  const extraTotal = extraExpenses.reduce((sum, e) => sum + e.amount, 0);
   return {
     labourTotal,
     materialTotal,
     unexpectedTotal,
-    currentSpend: calcCurrentSpend(labourTotal, materialTotal, unexpectedTotal),
+    contractTotal,
+    extraTotal,
+    currentSpend: calcCurrentSpend(labourTotal, materialTotal, unexpectedTotal, contractTotal, extraTotal),
   };
+}
+
+// Supervisors see Total Spend without extra expenses (those are shown in their own card)
+function supervisorSpend(user, spend) {
+  return user.role === 'supervisor' ? spend.currentSpend - spend.extraTotal : spend.currentSpend;
 }
 
 // GET /api/sites
@@ -94,7 +117,7 @@ exports.getSites = async (req, res) => {
     const enriched = await Promise.all(sites.map(async (site) => {
       const s = site.toObject();
       const spend = await getSiteSpend(site._id);
-      s.currentSpend = spend.currentSpend;
+      s.currentSpend = supervisorSpend(req.user, spend);
       if (req.user.role !== 'supervisor') {
         s.remainingAmount = calcRemainingAmount(site.totalValuation, site.amountReceived);
         s.remainingBudget = calcRemainingBudget(site.totalValuation, spend.currentSpend);
@@ -126,10 +149,12 @@ exports.getSite = async (req, res) => {
 
     const s = site.toObject();
     const spend = await getSiteSpend(site._id);
-    s.currentSpend = spend.currentSpend;
+    s.currentSpend = supervisorSpend(req.user, spend);
     s.labourTotal = spend.labourTotal;
     s.materialTotal = spend.materialTotal;
     s.unexpectedTotal = spend.unexpectedTotal;
+    s.contractTotal = spend.contractTotal;
+    s.extraTotal = spend.extraTotal;
     if (req.user.role !== 'supervisor') {
       s.remainingAmount = calcRemainingAmount(site.totalValuation, site.amountReceived);
       s.remainingBudget = calcRemainingBudget(site.totalValuation, spend.currentSpend);
@@ -417,6 +442,7 @@ exports.deleteSite = async (req, res) => {
       MaterialLog.deleteMany({ siteId }),
       UnexpectedCost.deleteMany({ siteId }),
       SiteContract.deleteMany({ siteId }),
+      ExtraExpense.deleteMany({ siteId }),
       Credit.deleteMany({ siteId }),
     ]);
     await site.deleteOne();
@@ -516,28 +542,64 @@ exports.getLabourLogs = async (req, res) => {
   }
 };
 
+// PUT /api/sites/:id/labour/:logId - admin / superadmin only (enforced in the route)
+// body: { date, labourTypeId, workerId, days, rateOverride, remarks }; omitted fields keep their value
 exports.updateLabourLog = async (req, res) => {
   try {
-    if (!isValidObjectId(req.params.id) || !isValidObjectId(req.params.logId)) {
+    if (!isValidObjectId(req.params.entryId)) {
       return res.status(400).json({ success: false, message: 'Invalid ID' });
     }
-    const site = await Site.findById(req.params.id);
-    if (!site) return res.status(404).json({ success: false, message: 'Site not found' });
-    if (!canAccessSite(req.user, site)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
-    const log = await LabourLog.findById(req.params.logId);
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const log = await LabourLog.findOne({ _id: req.params.entryId, siteId: site._id });
     if (!log) return res.status(404).json({ success: false, message: 'Labour log not found' });
-    const { advancePaid, paid } = req.body;
-    const nextAdvance = Number(advancePaid ?? log.advancePaid ?? 0);
-    const finalAdvance = Math.min(Math.max(nextAdvance, 0), Number(log.totalAmount || 0));
-    log.advancePaid = finalAdvance;
-    log.paid = paid === undefined ? finalAdvance >= Number(log.totalAmount || 0) : Boolean(paid);
-    if (paid !== undefined && Boolean(paid)) {
-      log.advancePaid = Number(log.totalAmount || 0);
-      log.paid = true;
+
+    const { date, labourTypeId, workerId, days, rateOverride, remarks } = req.body;
+    const nextTypeId = labourTypeId || log.labourTypeId;
+    const nextWorkerId = workerId || log.workerId;
+    if (!isValidObjectId(nextTypeId) || !isValidObjectId(nextWorkerId)) {
+      return res.status(400).json({ success: false, message: 'Invalid labour type or worker ID' });
     }
+    const [labourType, worker] = await Promise.all([LabourType.findById(nextTypeId), Worker.findById(nextWorkerId)]);
+    if (!labourType) return res.status(404).json({ success: false, message: 'Labour type not found' });
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker not found' });
+    const entryDate = date ? new Date(date) : log.date;
+    if (Number.isNaN(entryDate.getTime())) return res.status(400).json({ success: false, message: 'Invalid date' });
+    const nextDays = days !== undefined && days !== '' ? Number(days) : log.days;
+    if (!Number.isFinite(nextDays) || nextDays <= 0) {
+      return res.status(400).json({ success: false, message: 'Days must be greater than 0' });
+    }
+    if (await LabourLog.exists({ _id: { $ne: log._id }, siteId: site._id, workerId: nextWorkerId, date: sameDayRange(entryDate) })) {
+      return res.status(400).json({ success: false, message: 'This worker is already added for this date' });
+    }
+    // Keep the saved rate unless a new one is sent or the labour type changed
+    const typeChanged = String(nextTypeId) !== String(log.labourTypeId);
+    const rateAtTime = rateOverride !== undefined && rateOverride !== null && rateOverride !== ''
+      ? Number(rateOverride) : (typeChanged ? labourType.ratePerDay : log.rateAtTime);
+    if (!Number.isFinite(rateAtTime) || rateAtTime < 0) {
+      return res.status(400).json({ success: false, message: 'Rate must be a non-negative number' });
+    }
+
+    log.date = entryDate;
+    log.labourTypeId = nextTypeId;
+    log.workerId = nextWorkerId;
+    log.labourTypeNameSnapshot = labourType.name;
+    log.workerNameSnapshot = worker.name;
+    log.days = nextDays;
+    log.rateAtTime = rateAtTime;
+    log.totalAmount = calcLabourTotal(nextDays, rateAtTime);
+    log.advancePaid = Math.min(Number(log.advancePaid || 0), log.totalAmount);
+    log.paid = log.advancePaid >= log.totalAmount;
+    if (remarks !== undefined) log.remarks = remarks || '';
     await log.save();
+
+    await Attendance.updateOne({ labourLogId: log._id }, {
+      workerId: log.workerId,
+      workerNameSnapshot: log.workerNameSnapshot,
+      labourTypeId: log.labourTypeId,
+      labourTypeNameSnapshot: log.labourTypeNameSnapshot,
+      date: log.date,
+    });
     res.json({ success: true, labourLog: log });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to update labour log' });
@@ -685,7 +747,7 @@ exports.addContract = async (req, res) => {
     if (!canAccessSite(req.user, site)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
-    const { contractTypeId, contractTypeName, priceAtTime, date } = req.body;
+    const { contractTypeId, contractTypeName, priceAtTime, date, remarks } = req.body;
     if (!priceAtTime) {
       return res.status(400).json({ success: false, message: 'Price required' });
     }
@@ -713,6 +775,7 @@ exports.addContract = async (req, res) => {
       contractTypeId: contractTypeId && isValidObjectId(contractTypeId) ? contractTypeId : undefined,
       contractTypeNameSnapshot: String(nameSnapshot).trim(),
       priceAtTime: Number(priceAtTime),
+      remarks: String(remarks || '').trim(),
       date: entryDate,
       createdBy: req.user._id,
     });
@@ -737,5 +800,255 @@ exports.getContracts = async (req, res) => {
     res.json({ success: true, contracts });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to get contracts' });
+  }
+};
+
+// Loads the site and checks access; sends the error response and returns null when not allowed
+async function loadAccessibleSite(req, res) {
+  if (!isValidObjectId(req.params.id)) {
+    res.status(400).json({ success: false, message: 'Invalid site ID' });
+    return null;
+  }
+  const site = await Site.findById(req.params.id);
+  if (!site) {
+    res.status(404).json({ success: false, message: 'Site not found' });
+    return null;
+  }
+  if (!canAccessSite(req.user, site)) {
+    res.status(403).json({ success: false, message: 'Access denied' });
+    return null;
+  }
+  return site;
+}
+
+// Validates name/amount from the request body; returns an error message or null
+function extraExpenseError({ name, amount }) {
+  if (!name || !String(name).trim() || amount === undefined || amount === '') return 'Name and amount required';
+  if (isNaN(amount) || Number(amount) < 0) return 'Amount must be a non-negative number';
+  return null;
+}
+
+// POST /api/sites/:id/extra-expenses
+exports.addExtraExpense = async (req, res) => {
+  try {
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const { name, remarks, amount, date } = req.body;
+    const fieldError = extraExpenseError(req.body);
+    if (fieldError) return res.status(400).json({ success: false, message: fieldError });
+    const dateError = checkEntryDate(req.user, date);
+    if (dateError) return res.status(400).json({ success: false, message: dateError });
+    const entryDate = date ? new Date(date) : new Date();
+    const duplicate = await ExtraExpense.exists({
+      siteId: site._id, name: sameNameRegex(name), amount: Number(amount), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'The same extra expense already exists for this date' });
+    }
+    const expense = await ExtraExpense.create({
+      siteId: site._id,
+      name: String(name).trim(),
+      remarks: remarks || '',
+      amount: Number(amount),
+      date: entryDate,
+      createdBy: req.user._id,
+    });
+    res.status(201).json({ success: true, extraExpense: expense });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to add extra expense' });
+  }
+};
+
+// GET /api/sites/:id/extra-expenses
+exports.getExtraExpenses = async (req, res) => {
+  try {
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const expenses = await ExtraExpense.find({ siteId: site._id }).sort({ date: -1 });
+    res.json({ success: true, extraExpenses: expenses });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get extra expenses' });
+  }
+};
+
+// PUT /api/sites/:id/extra-expenses/:expenseId - admin / superadmin only (enforced in the route)
+exports.updateExtraExpense = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.entryId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const expense = await ExtraExpense.findOne({ _id: req.params.entryId, siteId: site._id });
+    if (!expense) return res.status(404).json({ success: false, message: 'Extra expense not found' });
+    const { name, remarks, amount, date } = req.body;
+    const fieldError = extraExpenseError(req.body);
+    if (fieldError) return res.status(400).json({ success: false, message: fieldError });
+    const entryDate = date ? new Date(date) : expense.date;
+    if (Number.isNaN(entryDate.getTime())) return res.status(400).json({ success: false, message: 'Invalid date' });
+    const duplicate = await ExtraExpense.exists({
+      _id: { $ne: expense._id }, siteId: site._id, name: sameNameRegex(name), amount: Number(amount), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'The same extra expense already exists for this date' });
+    }
+    expense.name = String(name).trim();
+    expense.remarks = remarks || '';
+    expense.amount = Number(amount);
+    expense.date = entryDate;
+    await expense.save();
+    res.json({ success: true, extraExpense: expense });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update extra expense' });
+  }
+};
+
+// DELETE /api/sites/:id/<entries>/:entryId - admins delete any entry, supervisors only entries dated this week.
+// afterDelete runs extra cleanup (e.g. the attendance row created with a labour log).
+const makeDeleteHandler = (Model, label, afterDelete) => async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.entryId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const entry = await Model.findOne({ _id: req.params.entryId, siteId: site._id });
+    if (!entry) return res.status(404).json({ success: false, message: `${label} not found` });
+    const dateError = checkDeleteDate(req.user, entry.date);
+    if (dateError) return res.status(403).json({ success: false, message: dateError });
+    await entry.deleteOne();
+    if (afterDelete) await afterDelete(entry);
+    res.json({ success: true, message: `${label} deleted` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: `Failed to delete ${label.toLowerCase()}` });
+  }
+};
+
+exports.deleteLabourLog = makeDeleteHandler(LabourLog, 'Labour entry', log => Attendance.deleteOne({ labourLogId: log._id }));
+exports.deleteMaterialLog = makeDeleteHandler(MaterialLog, 'Material entry');
+exports.deleteUnexpectedCost = makeDeleteHandler(UnexpectedCost, 'Unexpected cost');
+exports.deleteContract = makeDeleteHandler(SiteContract, 'Contract');
+exports.deleteExtraExpense = makeDeleteHandler(ExtraExpense, 'Extra expense');
+
+// PUT /api/sites/:id/material/:entryId - admin / superadmin only (enforced in the route)
+exports.updateMaterialLog = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.entryId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const log = await MaterialLog.findOne({ _id: req.params.entryId, siteId: site._id });
+    if (!log) return res.status(404).json({ success: false, message: 'Material entry not found' });
+    const { date, materialId, unit, quantity, rateAtTime, discount, remarks } = req.body;
+    if (!materialId || !unit || quantity === undefined || quantity === '' || rateAtTime === undefined || rateAtTime === '') {
+      return res.status(400).json({ success: false, message: 'Material, unit, quantity and rate required' });
+    }
+    if (!isValidObjectId(materialId)) {
+      return res.status(400).json({ success: false, message: 'Invalid material ID' });
+    }
+    if ([quantity, rateAtTime, discount || 0].some(v => isNaN(v) || Number(v) < 0)) {
+      return res.status(400).json({ success: false, message: 'Quantity, rate and discount must be non-negative numbers' });
+    }
+    const material = await Material.findById(materialId);
+    if (!material) return res.status(404).json({ success: false, message: 'Material not found' });
+    const entryDate = date ? new Date(date) : log.date;
+    if (Number.isNaN(entryDate.getTime())) return res.status(400).json({ success: false, message: 'Invalid date' });
+    const duplicate = await MaterialLog.exists({
+      _id: { $ne: log._id }, siteId: site._id, materialId, unit, quantity: Number(quantity),
+      rateAtTime: Number(rateAtTime), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'The same material entry already exists for this date' });
+    }
+    const discountNum = Number(discount) || 0;
+    log.date = entryDate;
+    log.materialId = materialId;
+    log.materialNameSnapshot = material.name;
+    log.unit = unit;
+    log.quantity = Number(quantity);
+    log.rateAtTime = Number(rateAtTime);
+    log.discount = discountNum;
+    log.totalAmount = calcMaterialTotal(Number(quantity), Number(rateAtTime), discountNum);
+    log.remarks = remarks || '';
+    await log.save();
+    res.json({ success: true, materialLog: log });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update material entry' });
+  }
+};
+
+// PUT /api/sites/:id/unexpected-cost/:entryId - admin / superadmin only (enforced in the route)
+exports.updateUnexpectedCost = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.entryId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const cost = await UnexpectedCost.findOne({ _id: req.params.entryId, siteId: site._id });
+    if (!cost) return res.status(404).json({ success: false, message: 'Unexpected cost not found' });
+    const { name, remarks, amount, date } = req.body;
+    const fieldError = extraExpenseError(req.body);
+    if (fieldError) return res.status(400).json({ success: false, message: fieldError });
+    const entryDate = date ? new Date(date) : cost.date;
+    if (Number.isNaN(entryDate.getTime())) return res.status(400).json({ success: false, message: 'Invalid date' });
+    const duplicate = await UnexpectedCost.exists({
+      _id: { $ne: cost._id }, siteId: site._id, name: sameNameRegex(name), amount: Number(amount), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'The same unexpected cost already exists for this date' });
+    }
+    cost.name = String(name).trim();
+    cost.remarks = remarks || '';
+    cost.amount = Number(amount);
+    cost.date = entryDate;
+    await cost.save();
+    res.json({ success: true, unexpectedCost: cost });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update unexpected cost' });
+  }
+};
+
+// PUT /api/sites/:id/contracts/:entryId - admin / superadmin only (enforced in the route)
+exports.updateContract = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.entryId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const contract = await SiteContract.findOne({ _id: req.params.entryId, siteId: site._id });
+    if (!contract) return res.status(404).json({ success: false, message: 'Contract not found' });
+    const { contractTypeId, contractTypeName, priceAtTime, date, remarks } = req.body;
+    if (priceAtTime === undefined || priceAtTime === '' || isNaN(priceAtTime) || Number(priceAtTime) < 0) {
+      return res.status(400).json({ success: false, message: 'Price required' });
+    }
+    let nameSnapshot = contractTypeName;
+    const typeId = contractTypeId && isValidObjectId(contractTypeId) ? contractTypeId : undefined;
+    if (typeId) {
+      const ct = await ContractType.findById(typeId);
+      if (ct) nameSnapshot = ct.name;
+    }
+    if (!nameSnapshot || !String(nameSnapshot).trim()) {
+      return res.status(400).json({ success: false, message: 'Contract type name required' });
+    }
+    const entryDate = date ? new Date(date) : contract.date;
+    if (Number.isNaN(entryDate.getTime())) return res.status(400).json({ success: false, message: 'Invalid date' });
+    const duplicate = await SiteContract.exists({
+      _id: { $ne: contract._id }, siteId: site._id, contractTypeNameSnapshot: sameNameRegex(nameSnapshot), date: sameDayRange(entryDate),
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'This contract is already added for this date' });
+    }
+    contract.contractTypeId = typeId;
+    contract.contractTypeNameSnapshot = String(nameSnapshot).trim();
+    contract.priceAtTime = Number(priceAtTime);
+    if (remarks !== undefined) contract.remarks = String(remarks || '').trim();
+    contract.date = entryDate;
+    await contract.save();
+    res.json({ success: true, contract });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update contract' });
   }
 };

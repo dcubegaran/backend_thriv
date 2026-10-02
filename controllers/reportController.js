@@ -2,6 +2,8 @@ const Site = require('../models/Site');
 const LabourLog = require('../models/LabourLog');
 const MaterialLog = require('../models/MaterialLog');
 const UnexpectedCost = require('../models/UnexpectedCost');
+const SiteContract = require('../models/SiteContract');
+const ExtraExpense = require('../models/ExtraExpense');
 const PersonalExpense = require('../models/PersonalExpense');
 const {
   calcCurrentSpend, calcRemainingAmount, calcRemainingBudget,
@@ -32,10 +34,12 @@ exports.getReport = async (req, res) => {
 
     const dateRange = { $gte: start, $lte: end };
 
-    const [labourLogs, materialLogs, unexpectedCosts, personalExpenses] = await Promise.all([
+    const [labourLogs, materialLogs, unexpectedCosts, contracts, extraExpenses, personalExpenses] = await Promise.all([
       LabourLog.find({ siteId: { $in: siteIds }, date: dateRange }),
       MaterialLog.find({ siteId: { $in: siteIds }, date: dateRange }),
       UnexpectedCost.find({ siteId: { $in: siteIds }, date: dateRange }),
+      SiteContract.find({ siteId: { $in: siteIds }, date: dateRange }),
+      ExtraExpense.find({ siteId: { $in: siteIds }, date: dateRange }),
       req.user.role !== 'supervisor'
         ? PersonalExpense.find({ date: dateRange })
         : Promise.resolve([]),
@@ -44,7 +48,9 @@ exports.getReport = async (req, res) => {
     const labourTotal = labourLogs.reduce((s, l) => s + l.totalAmount, 0);
     const materialTotal = materialLogs.reduce((s, m) => s + m.totalAmount, 0);
     const unexpectedTotal = unexpectedCosts.reduce((s, u) => s + u.amount, 0);
-    const currentSpend = calcCurrentSpend(labourTotal, materialTotal, unexpectedTotal);
+    const contractTotal = contracts.reduce((s, c) => s + c.priceAtTime, 0);
+    const extraTotal = extraExpenses.reduce((s, e) => s + e.amount, 0);
+    const currentSpend = calcCurrentSpend(labourTotal, materialTotal, unexpectedTotal, contractTotal, extraTotal);
     const personalExpenseTotal = personalExpenses.reduce((s, p) => s + p.amount, 0);
 
     // Per-site breakdown
@@ -56,7 +62,10 @@ exports.getReport = async (req, res) => {
       const siteLabour = siteLogs.reduce((s, l) => s + l.totalAmount, 0);
       const siteMaterial = siteMats.reduce((s, m) => s + m.totalAmount, 0);
       const siteUnexpected = siteUnex.reduce((s, u) => s + u.amount, 0);
-      const siteSpend = calcCurrentSpend(siteLabour, siteMaterial, siteUnexpected);
+      const isThisSite = item => item.siteId.toString() === site._id.toString();
+      const siteContract = contracts.filter(isThisSite).reduce((s, c) => s + c.priceAtTime, 0);
+      const siteExtra = extraExpenses.filter(isThisSite).reduce((s, e) => s + e.amount, 0);
+      const siteSpend = calcCurrentSpend(siteLabour, siteMaterial, siteUnexpected, siteContract, siteExtra);
 
       const remainingAmount = calcRemainingAmount(site.totalValuation, site.amountReceived);
       const remainingBudget = calcRemainingBudget(site.totalValuation, siteSpend);
@@ -72,6 +81,8 @@ exports.getReport = async (req, res) => {
         labourTotal: siteLabour,
         materialTotal: siteMaterial,
         unexpectedTotal: siteUnexpected,
+        contractTotal: siteContract,
+        extraTotal: siteExtra,
         currentSpend: siteSpend,
         remainingAmount,
         remainingBudget,
@@ -99,6 +110,8 @@ exports.getReport = async (req, res) => {
           labourTotal,
           materialTotal,
           unexpectedTotal,
+          contractTotal,
+          extraTotal,
           currentSpend,
           personalExpenseTotal: req.user.role !== 'supervisor' ? personalExpenseTotal : undefined,
           closedSiteProfit,

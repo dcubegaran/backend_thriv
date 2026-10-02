@@ -18,10 +18,10 @@ function calcMaterialTotal(quantity, rateAtTime, discount = 0) {
 
 /**
  * Calculate Current Spend for a site
- * Current Spend = Labour + Material + Unexpected Costs
+ * Current Spend = Labour + Material + Unexpected Costs + Contracts + Extra Expenses
  */
-function calcCurrentSpend(labourTotal, materialTotal, unexpectedTotal) {
-  return labourTotal + materialTotal + unexpectedTotal;
+function calcCurrentSpend(labourTotal, materialTotal, unexpectedTotal, contractTotal = 0, extraTotal = 0) {
+  return labourTotal + materialTotal + unexpectedTotal + contractTotal + extraTotal;
 }
 
 /**

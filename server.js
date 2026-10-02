@@ -41,6 +41,7 @@ app.use('/api/attendance', require('./routes/attendance'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/upload', require('./routes/upload'));
 app.use('/api/friends', require('./routes/friends'));
+app.use('/api/agreements', require('./routes/agreements'));
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
