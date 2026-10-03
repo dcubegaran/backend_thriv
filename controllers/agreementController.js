@@ -3,6 +3,7 @@ const { isValidObjectId } = require('../utils/validate');
 
 const MAX_ITEMS = 300;
 const MAX_TEXT = 5000;
+const MAX_SECTION_TEXT = 200000; // a pasted section can hold several pages
 
 const cleanText = value => String(value ?? '').slice(0, MAX_TEXT);
 const cleanList = value => (Array.isArray(value) ? value.slice(0, MAX_ITEMS).map(cleanText) : []);
@@ -20,9 +21,15 @@ function readAgreement(body = {}) {
     }
     payments.push({ description: cleanText(row?.description), amount });
   }
+  const sections = (Array.isArray(body.sections) ? body.sections.slice(0, 10) : []).map(s => ({
+    heading: cleanText(s?.heading),
+    text: String(s?.text ?? '').slice(0, MAX_SECTION_TEXT),
+    newPage: Boolean(s?.newPage),
+  }));
   const data = {
     language,
     title: cleanText(body.title).trim(),
+    sections,
     intro: cleanList(body.intro),
     workHeading: cleanText(body.workHeading),
     clauses: cleanList(body.clauses),
@@ -32,7 +39,7 @@ function readAgreement(body = {}) {
     payments,
   };
   const hasContent = data.title || data.closing || data.workHeading || data.paymentHeading
-    || [...data.intro, ...data.clauses, ...data.witnesses].some(s => s.trim())
+    || [...data.intro, ...data.clauses, ...data.witnesses, ...sections.map(s => s.text)].some(s => s.trim())
     || payments.some(p => p.description.trim() || p.amount !== null);
   if (!hasContent) return { error: 'The agreement is empty' };
   return { data };

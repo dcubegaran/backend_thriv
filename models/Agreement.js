@@ -8,9 +8,19 @@ const paymentSchema = new mongoose.Schema({
   amount: { type: Number, default: null, min: 0 }, // empty -> the row prints as a plain note
 }, { _id: false });
 
+// Free-text section: printed exactly as typed / pasted (line breaks and spacing kept)
+const sectionSchema = new mongoose.Schema({
+  heading: { type: String }, // bold heading printed above the section (e.g. "கட்டிட வேலை விளக்கம் :")
+  text: { type: String, default: '' },
+  newPage: { type: Boolean, default: false }, // start this section on a new page
+}, { _id: false });
+
 const agreementSchema = new mongoose.Schema({
   language: { type: String, enum: ['en', 'ta'], default: 'ta' },
   title: { type: String, default: '', trim: true },
+  // Current editor: up to three free-text sections. The structured fields below are kept
+  // for agreements saved before; they are used only when no section has text.
+  sections: { type: [sectionSchema], default: undefined },
   intro: { type: [String], default: [] },
   workHeading: { type: String, default: '' },
   clauses: { type: [String], default: [] },
