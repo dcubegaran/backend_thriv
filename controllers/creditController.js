@@ -2,12 +2,9 @@ const Credit = require('../models/Credit');
 const Site = require('../models/Site');
 const { isValidObjectId, sameNameRegex, sameDayRange } = require('../utils/validate');
 
-// Helper
-function canAccessSite(user, site) {
-  if (user.role === 'superadmin') return true;
-  if (user.role === 'admin') return site.assignedAdmins.some(id => id.toString() === user._id.toString());
-  if (user.role === 'supervisor') return site.assignedSupervisors.some(id => id.toString() === user._id.toString());
-  return false;
+// Helper: all sites are shared between every admin and supervisor (same rule as siteController)
+function canAccessSite(user) {
+  return ['superadmin', 'admin', 'supervisor'].includes(user.role);
 }
 
 // GET /api/credits?siteId=...
@@ -35,7 +32,7 @@ exports.getCredits = async (req, res) => {
 // POST /api/credits
 exports.createCredit = async (req, res) => {
   try {
-    const { siteId, shopName, amount, date } = req.body;
+    const { siteId, shopName, amount, date, remarks } = req.body;
     if (!siteId || !shopName || amount === undefined) {
       return res.status(400).json({ success: false, message: 'Site, shop name and amount required' });
     }
@@ -61,6 +58,7 @@ exports.createCredit = async (req, res) => {
       siteId,
       shopName: String(shopName).trim(),
       amount: Number(amount),
+      remarks: String(remarks || '').trim(),
       date: entryDate,
       createdBy: req.user._id,
     });

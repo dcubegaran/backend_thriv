@@ -21,15 +21,8 @@ exports.getReport = async (req, res) => {
     const end = endDate ? new Date(endDate) : now;
     end.setHours(23, 59, 59, 999);
 
-    // Determine accessible sites
-    let siteQuery = {};
-    if (req.user.role === 'admin') {
-      siteQuery = { assignedAdmins: req.user._id };
-    } else if (req.user.role === 'supervisor') {
-      siteQuery = { assignedSupervisors: req.user._id };
-    }
-
-    const sites = await Site.find(siteQuery);
+    // All sites are shared between every admin and supervisor
+    const sites = await Site.find({});
     const siteIds = sites.map(s => s._id);
 
     const dateRange = { $gte: start, $lte: end };

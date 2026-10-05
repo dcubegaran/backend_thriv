@@ -5,6 +5,7 @@ const creditSchema = new mongoose.Schema({
   shopName: { type: String, required: true, trim: true },
   date: { type: Date, default: Date.now },
   amount: { type: Number, required: true, min: 0 },
+  remarks: { type: String, default: '' },
   status: { type: String, enum: ['open', 'closed'], default: 'open' },
   closedAt: { type: Date },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },

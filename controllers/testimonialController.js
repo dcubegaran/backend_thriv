@@ -13,13 +13,13 @@ exports.getTestimonials = async (req, res) => {
 exports.createTestimonial = async (req, res) => {
   try {
     const { customerName, location, textEn, textTa, photo } = req.body;
-    if (!customerName || !location || !textEn) {
-      return res.status(400).json({ success: false, message: 'Name, location and text required' });
+    if (!customerName || !textEn) {
+      return res.status(400).json({ success: false, message: 'Name and text required' });
     }
     if (await Testimonial.exists({ customerName: sameNameRegex(customerName), textEn: sameNameRegex(textEn) })) {
       return res.status(400).json({ success: false, message: 'This testimonial already exists' });
     }
-    const t = await Testimonial.create({ customerName, location, textEn, textTa, photo });
+    const t = await Testimonial.create({ customerName, location: location || '', textEn, textTa, photo });
     res.status(201).json({ success: true, testimonial: t });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to create testimonial' });

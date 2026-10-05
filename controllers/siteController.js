@@ -18,24 +18,11 @@ const {
   calcRemainingAmount, calcRemainingBudget, calcSiteProfit, shouldShowWarning
 } = require('../utils/calculations');
 
-// Helper: check if user can access site
-// Handles both populated User objects and raw ObjectIds in the assigned arrays
-function canAccessSite(user, site) {
-  if (user.role === 'superadmin') return true;
-  const userId = user._id.toString();
-  if (user.role === 'admin') {
-    return site.assignedAdmins.some(entry => {
-      const id = entry._id || entry;
-      return id.toString() === userId;
-    });
-  }
-  if (user.role === 'supervisor') {
-    return site.assignedSupervisors.some(entry => {
-      const id = entry._id || entry;
-      return id.toString() === userId;
-    });
-  }
-  return false;
+// Helper: check if user can access site.
+// All sites are shared: every admin and supervisor works on every site (what each role may do
+// is still limited by the route permissions). The assigned arrays are kept but no longer restrict access.
+function canAccessSite(user) {
+  return ['superadmin', 'admin', 'supervisor'].includes(user.role);
 }
 
 // Supervisors may only enter dates in the current week (Sunday to Saturday), up to today (no future dates).
@@ -95,21 +82,11 @@ async function getSiteSpend(siteId) {
   };
 }
 
-// Supervisors see Total Spend without extra expenses (those are shown in their own card)
-function supervisorSpend(user, spend) {
-  return user.role === 'supervisor' ? spend.currentSpend - spend.extraTotal : spend.currentSpend;
-}
-
 // GET /api/sites
 exports.getSites = async (req, res) => {
   try {
-    let query = {};
-    if (req.user.role === 'admin') {
-      query = { assignedAdmins: req.user._id };
-    } else if (req.user.role === 'supervisor') {
-      query = { assignedSupervisors: req.user._id };
-    }
-    const sites = await Site.find(query)
+    // Every admin and supervisor sees every site
+    const sites = await Site.find({})
       .populate('assignedAdmins', 'name email')
       .populate('assignedSupervisors', 'name email')
       .sort({ createdAt: -1 });
@@ -117,13 +94,13 @@ exports.getSites = async (req, res) => {
     const enriched = await Promise.all(sites.map(async (site) => {
       const s = site.toObject();
       const spend = await getSiteSpend(site._id);
-      s.currentSpend = supervisorSpend(req.user, spend);
-      if (req.user.role !== 'supervisor') {
-        s.remainingAmount = calcRemainingAmount(site.totalValuation, site.amountReceived);
-        s.remainingBudget = calcRemainingBudget(site.totalValuation, spend.currentSpend);
-        s.warning = shouldShowWarning(s.remainingAmount);
-        s.profit = site.status === 'closed' ? calcSiteProfit(site.totalValuation, spend.currentSpend) : null;
-      }
+      // Admins and supervisors see the same figures
+      s.currentSpend = spend.currentSpend;
+      s.extraTotal = spend.extraTotal;
+      s.remainingAmount = calcRemainingAmount(site.totalValuation, site.amountReceived);
+      s.remainingBudget = calcRemainingBudget(site.totalValuation, spend.currentSpend);
+      s.warning = shouldShowWarning(s.remainingAmount);
+      s.profit = site.status === 'closed' ? calcSiteProfit(site.totalValuation, spend.currentSpend) : null;
       return s;
     }));
 
@@ -149,18 +126,17 @@ exports.getSite = async (req, res) => {
 
     const s = site.toObject();
     const spend = await getSiteSpend(site._id);
-    s.currentSpend = supervisorSpend(req.user, spend);
+    s.currentSpend = spend.currentSpend;
     s.labourTotal = spend.labourTotal;
     s.materialTotal = spend.materialTotal;
     s.unexpectedTotal = spend.unexpectedTotal;
     s.contractTotal = spend.contractTotal;
     s.extraTotal = spend.extraTotal;
-    if (req.user.role !== 'supervisor') {
-      s.remainingAmount = calcRemainingAmount(site.totalValuation, site.amountReceived);
-      s.remainingBudget = calcRemainingBudget(site.totalValuation, spend.currentSpend);
-      s.warning = shouldShowWarning(s.remainingAmount);
-      s.profit = site.status === 'closed' ? calcSiteProfit(site.totalValuation, spend.currentSpend) : null;
-    }
+    // Admins and supervisors see the same figures
+    s.remainingAmount = calcRemainingAmount(site.totalValuation, site.amountReceived);
+    s.remainingBudget = calcRemainingBudget(site.totalValuation, spend.currentSpend);
+    s.warning = shouldShowWarning(s.remainingAmount);
+    s.profit = site.status === 'closed' ? calcSiteProfit(site.totalValuation, spend.currentSpend) : null;
     res.json({ success: true, site: s });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to get site' });
