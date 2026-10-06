@@ -20,7 +20,9 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Static uploads
+// Uploaded images saved in the database (current uploads)
+app.get('/uploads/db/:id', require('./routes/upload').serveImage);
+// Static uploads (older images saved on disk, if still present)
 app.use('/uploads', express.static(path.join(__dirname, process.env.UPLOAD_DIR || 'uploads')));
 
 // Routes
@@ -50,6 +52,10 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.use((err, req, res, next) => {
   if (err.code === 'LIMIT_FILE_SIZE') {
     return res.status(400).json({ success: false, message: 'File too large. Maximum 5 MB.' });
+  }
+  // Upload rejected (e.g. not an image) - the message is safe to show
+  if (err.status === 400) {
+    return res.status(400).json({ success: false, message: err.message });
   }
   console.error(err.stack);
   res.status(500).json({ success: false, message: 'Internal server error' });

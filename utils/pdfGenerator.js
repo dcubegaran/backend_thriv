@@ -34,6 +34,25 @@ function resolveUploadImage(url) {
   return candidates.find(p => fs.existsSync(p)) || null;
 }
 
+// Images uploaded to the database ("/uploads/db/<id>"): loaded up front because the PDF is built
+// synchronously. Returns a Map of url -> Buffer (JPEG / PNG only, which is what pdfkit can embed).
+async function loadDbImages(urls) {
+  const ids = [...new Set(urls)]
+    .map(url => (typeof url === 'string' ? url.match(/^\/uploads\/db\/([a-f0-9]{24})$/i) : null))
+    .filter(Boolean)
+    .map(m => m[1]);
+  const map = new Map();
+  if (!ids.length) return map;
+  try {
+    const UploadedImage = require('../models/UploadedImage');
+    const images = await UploadedImage.find({ _id: { $in: ids }, contentType: { $in: ['image/jpeg', 'image/png'] } });
+    images.forEach(img => map.set(`/uploads/db/${img._id}`, Buffer.from(img.data)));
+  } catch (e) {
+    // Missing images just leave their cell empty
+  }
+  return map;
+}
+
 // ---- Fonts -----------------------------------------------------------------
 // The bundled Noto Sans Tamil files only contain Tamil letters and the rupee sign
 // (no Latin letters, digits or punctuation), while Helvetica has no Tamil and no
@@ -63,6 +82,7 @@ const RUN_RE = /[\u0B80-\u0BFF\u200C\u200D\u20B9]+|[^\u0B80-\u0BFF\u200C\u200D\u
  * quoteData: { quoteNumber, date, customer, sqftRate, baseAmount, offersApplied, finalAmount, terms, language, company }
  */
 async function generateQuotePDF(quoteData) {
+  const dbImages = await loadDbImages((quoteData.offerShowcase || []).flatMap(o => o.photos || []));
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 50, size: 'A4' });
     const chunks = [];
@@ -320,7 +340,7 @@ async function generateQuotePDF(quoteData) {
           : offer.discountType === 'percentage'
             ? (isTamil ? `${offer.discountValue}% தள்ளுபடி` : `${offer.discountValue}% off`)
             : '';
-        const images = (offer.photos || []).map(resolveUploadImage).filter(Boolean);
+        const images = (offer.photos || []).map(url => dbImages.get(url) || resolveUploadImage(url)).filter(Boolean);
 
         // Keep the title with at least its first row of photos (or its text) on the same page
         newPageIfNeeded(images.length ? imgH + 60 : 50);
