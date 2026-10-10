@@ -1,6 +1,7 @@
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
+const { letterheadMargins, useLetterhead } = require('./letterhead');
 
 /**
  * Format number as Indian currency (e.g. ₹10,00,000)
@@ -84,12 +85,14 @@ const RUN_RE = /[\u0B80-\u0BFF\u200C\u200D\u20B9]+|[^\u0B80-\u0BFF\u200C\u200D\u
 async function generateQuotePDF(quoteData) {
   const dbImages = await loadDbImages((quoteData.offerShowcase || []).flatMap(o => o.photos || []));
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: 'A4' });
+    // Company letter pad behind every page; content stays between its header and the bottom wave
+    const doc = new PDFDocument({ margins: letterheadMargins(), size: 'A4' });
     const chunks = [];
 
     doc.on('data', chunk => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
+    useLetterhead(doc);
 
     const {
       quoteNumber, date, customer, sqftRate, baseAmount,
@@ -214,25 +217,7 @@ async function generateQuotePDF(quoteData) {
       return ly;
     };
 
-    // ---- Header ----
-    doc.rect(0, 0, doc.page.width, 110).fill('#f5f5f0');
-
-    // Company name
-    write(company.nameEn || 'Balu Hari Builders', 50, 25, { size: 22, bold: true, color: accentColor, align: 'center' });
-
-    if (isTamil && company.nameTa) {
-      write(company.nameTa, 50, 50, { size: 14, color: accentColor, align: 'center' });
-    }
-
-    write(
-      [company.address, company.phone, company.email].filter(Boolean).join('  |  '),
-      50, 72, { size: 10, color: mutedColor, align: 'center' }
-    );
-
-    // Divider
-    doc.moveTo(50, 115).lineTo(doc.page.width - 50, 115).strokeColor(accentColor).lineWidth(2).stroke();
-
-    // ---- Quotation Title ----
+    // ---- Quotation Title ---- (the letter pad above shows the company name, address and contact)
     doc.moveDown(0.5);
     const titleText = isTamil ? 'மதிப்பீடு' : 'QUOTATION';
     write(titleText, 50, 130, { size: 16, bold: true, color: accentColor, align: 'center' });
@@ -313,11 +298,11 @@ async function generateQuotePDF(quoteData) {
 
     // ---- Offers with photos (public quotes) ----
     if (offerShowcase && offerShowcase.length > 0) {
-      const pageBottom = () => doc.page.height - 110;
+      const pageBottom = () => doc.page.height - doc.page.margins.bottom;
       const newPageIfNeeded = (height) => {
         if (cy + height > pageBottom()) {
           doc.addPage();
-          cy = 50;
+          cy = doc.page.margins.top;
         }
       };
       newPageIfNeeded(60);
@@ -379,9 +364,9 @@ async function generateQuotePDF(quoteData) {
 
     // ---- Terms & Conditions ----
     if (terms && terms.trim()) {
-      if (cy > doc.page.height - 200) {
+      if (cy > doc.page.height - doc.page.margins.bottom - 90) {
         doc.addPage();
-        cy = 50;
+        cy = doc.page.margins.top;
       }
       doc.moveTo(50, cy).lineTo(doc.page.width - 50, cy).strokeColor(borderColor).lineWidth(1).stroke();
       cy += 15;
@@ -394,11 +379,12 @@ async function generateQuotePDF(quoteData) {
     }
 
     // ---- Footer ----
-    // If the terms ran down to the footer area, give the footer its own page instead of overlapping
-    if (cy > doc.page.height - 110) doc.addPage();
-    // Drawn inside the bottom margin, so switch the margin off to stop pdfkit adding a blank page
-    doc.page.margins.bottom = 0;
-    const footerY = doc.page.height - 100;
+    // Sits just above the letter pad's bottom wave. If the terms ran down into it, the footer
+    // gets its own page instead of overlapping.
+    const footerY = doc.page.height - doc.page.margins.bottom - 72;
+    if (cy > footerY - 10) doc.addPage();
+    // Drawn inside the bottom margin, so switch the margin off (on this page only) to stop pdfkit adding a blank page
+    doc.page.margins = { ...doc.page.margins, bottom: 0 };
     doc.moveTo(50, footerY).lineTo(doc.page.width - 50, footerY).strokeColor(borderColor).lineWidth(1).stroke();
 
     write(isTamil ? 'அங்கீகரிக்கப்பட்டது:' : 'Authorized By:', 50, footerY + 15, { size: 9, color: mutedColor });

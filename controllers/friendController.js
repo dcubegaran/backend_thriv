@@ -1,5 +1,5 @@
 const Friend = require('../models/Friend');
-const { sameNameRegex } = require('../utils/validate');
+const { sameNameRegex, isValidObjectId } = require('../utils/validate');
 
 // GET /api/friends
 exports.getFriends = async (req, res) => {
@@ -34,5 +34,17 @@ exports.createFriend = async (req, res) => {
     res.status(201).json({ success: true, friend });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to add friend' });
+  }
+};
+
+// DELETE /api/friends/:id
+exports.deleteFriend = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
+    const friend = await Friend.findByIdAndDelete(req.params.id);
+    if (!friend) return res.status(404).json({ success: false, message: 'Friend not found' });
+    res.json({ success: true, message: 'Friend deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete friend' });
   }
 };

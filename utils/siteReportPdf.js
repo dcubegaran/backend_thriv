@@ -1,6 +1,7 @@
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
+const { LETTERHEAD_MARGINS, LETTERHEAD_FOOTER_Y, useLetterhead } = require('./letterhead');
 
 const COLORS = {
   dark: '#1a1a1a',
@@ -14,7 +15,9 @@ const COLORS = {
 };
 
 const PAGE_MARGIN = 50;
-const BOTTOM_LIMIT = 70; // keep clear of the footer
+// Pages carry the company letter pad: content starts below its header and stops above its bottom wave
+const TOP = LETTERHEAD_MARGINS.top;
+const BOTTOM_LIMIT = LETTERHEAD_MARGINS.bottom; // distance from the page bottom kept clear
 
 // The bundled Tamil font has Tamil glyphs only (no Latin letters or digits),
 // so Tamil runs use it and everything else uses Helvetica.
@@ -59,7 +62,7 @@ function generateSiteReportPDF(data) {
     } = data;
 
     const doc = new PDFDocument({
-      margin: PAGE_MARGIN,
+      margins: { top: TOP, bottom: BOTTOM_LIMIT, left: PAGE_MARGIN, right: PAGE_MARGIN },
       size: 'A4',
       bufferPages: true,
       info: { Title: `Site Report - ${site.siteName}`, Author: company },
@@ -68,12 +71,13 @@ function generateSiteReportPDF(data) {
     doc.on('data', chunk => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
+    useLetterhead(doc);
 
     const pageWidth = doc.page.width;
     const contentWidth = pageWidth - PAGE_MARGIN * 2;
     const left = PAGE_MARGIN;
     const right = pageWidth - PAGE_MARGIN;
-    let y = PAGE_MARGIN;
+    let y = TOP;
 
     const latinFont = bold => (bold ? 'Helvetica-Bold' : 'Helvetica');
     const tamilFont = bold => (bold ? tamilBold : tamilRegular);
@@ -108,7 +112,7 @@ function generateSiteReportPDF(data) {
 
     const newPage = () => {
       doc.addPage();
-      y = PAGE_MARGIN;
+      y = TOP;
     };
 
     const ensureSpace = height => {
@@ -141,12 +145,8 @@ function generateSiteReportPDF(data) {
     };
 
     // ================= PAGE 1: site details + summary =================
-    doc.rect(0, 0, pageWidth, 90).fill(COLORS.band);
-    text(company, left, 24, { size: 22, bold: true, color: COLORS.accent, width: contentWidth, align: 'center' });
-    text('SITE REPORT', left, 56, { size: 12, bold: true, color: COLORS.muted, width: contentWidth, align: 'center' });
-    hr(98, COLORS.accent, 2);
-
-    y = 112;
+    text('SITE REPORT', left, TOP, { size: 14, bold: true, color: COLORS.accent, width: contentWidth, align: 'center' });
+    y = TOP + 28;
     text(`Report Period: ${formatDate(range.start)} to ${formatDate(range.end)}`, left, y, { size: 10, bold: true, width: contentWidth * 0.65, lineBreak: false });
     text(`Generated: ${formatDate(generatedAt)}`, left, y, { size: 9, color: COLORS.muted, width: contentWidth, align: 'right', lineBreak: false });
     y += 30;
@@ -255,7 +255,7 @@ function generateSiteReportPDF(data) {
       ];
       const dateRowHeight = 24;
       const pageLimit = () => doc.page.height - BOTTOM_LIMIT;
-      const freshPageRoom = pageLimit() - PAGE_MARGIN - 22;
+      const freshPageRoom = pageLimit() - TOP - 22;
       const breakWithHeader = () => {
         newPage();
         tableHeader(cols);
@@ -334,10 +334,9 @@ function generateSiteReportPDF(data) {
     const pages = doc.bufferedPageRange();
     for (let i = pages.start; i < pages.start + pages.count; i++) {
       doc.switchToPage(i);
-      doc.page.margins.bottom = 0; // allow drawing inside the bottom margin without spawning a page
-      const footerY = doc.page.height - 38;
-      hr(footerY - 8, COLORS.border, 0.5);
-      text(`${company}  |  ${site.siteName}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth * 0.7, lineBreak: false });
+      doc.page.margins = { ...doc.page.margins, bottom: 0 }; // allow drawing inside the bottom margin without spawning a page
+      const footerY = LETTERHEAD_FOOTER_Y;
+      text(`${site.siteName}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth * 0.7, lineBreak: false });
       text(`Page ${i + 1} of ${pages.count}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth, align: 'right', lineBreak: false });
     }
 
@@ -358,11 +357,12 @@ function generateTablePDF(data) {
       headers = [], rows = [], numeric = [], footer = null,
     } = data;
 
-    // Wide tables go landscape so columns stay readable
+    // Portrait, to match the letter pad behind every page
+    const margin = PAGE_MARGIN - 14;
     const doc = new PDFDocument({
-      margin: PAGE_MARGIN - 14,
+      margins: { top: TOP, bottom: BOTTOM_LIMIT, left: margin, right: margin },
       size: 'A4',
-      layout: headers.length > 6 ? 'landscape' : 'portrait',
+      layout: 'portrait',
       bufferPages: true,
       info: { Title: `${siteName} - ${title}`, Author: company },
     });
@@ -370,12 +370,12 @@ function generateTablePDF(data) {
     doc.on('data', chunk => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
+    useLetterhead(doc);
 
-    const margin = PAGE_MARGIN - 14;
     const left = margin;
     const contentWidth = doc.page.width - margin * 2;
-    const bottomLimit = doc.page.height - 56;
-    let y = margin;
+    const bottomLimit = doc.page.height - BOTTOM_LIMIT;
+    let y = TOP;
 
     const latinFont = bold => (bold ? 'Helvetica-Bold' : 'Helvetica');
     const tamilFont = bold => (bold ? tamilBold : tamilRegular);
@@ -433,11 +433,8 @@ function generateTablePDF(data) {
     };
 
     // ---- Heading ----
-    doc.rect(0, 0, doc.page.width, 78).fill(COLORS.band);
-    text(company, left, 18, { size: 18, bold: true, color: COLORS.accent, width: contentWidth, align: 'center' });
-    text(title.toUpperCase(), left, 44, { size: 11, bold: true, color: COLORS.muted, width: contentWidth, align: 'center' });
-    hr(84, COLORS.accent, 2);
-    y = 96;
+    text(title.toUpperCase(), left, TOP, { size: 13, bold: true, color: COLORS.accent, width: contentWidth, align: 'center' });
+    y = TOP + 24;
     text(siteName, left, y, { size: 13, bold: true, width: contentWidth });
     y += 20;
     [subtitle, ...meta].filter(Boolean).forEach(line => {
@@ -456,7 +453,7 @@ function generateTablePDF(data) {
       const height = Math.max(...row.map((c, i) => measureHeight(c, widths[i] - PAD, FONT))) + 10;
       if (y + height > bottomLimit) {
         doc.addPage();
-        y = margin;
+        y = TOP;
         tableHeader();
       }
       if (rIdx % 2 === 1) doc.rect(left, y, contentWidth, height).fill('#f8fafc');
@@ -468,7 +465,7 @@ function generateTablePDF(data) {
       const height = Math.max(...footer.map((c, i) => measureHeight(c, widths[i] - PAD, FONT, true))) + 12;
       if (y + height > bottomLimit) {
         doc.addPage();
-        y = margin;
+        y = TOP;
       }
       doc.rect(left, y, contentWidth, height).fill(COLORS.band);
       footer.forEach((c, i) => text(c, xs[i] + PAD / 2, y + 6, { size: FONT, bold: true, color: COLORS.accent, width: widths[i] - PAD, align: align(i) }));
@@ -479,10 +476,9 @@ function generateTablePDF(data) {
     const pages = doc.bufferedPageRange();
     for (let i = pages.start; i < pages.start + pages.count; i++) {
       doc.switchToPage(i);
-      doc.page.margins.bottom = 0;
-      const footerY = doc.page.height - 30;
-      hr(footerY - 8, COLORS.border, 0.5);
-      text(`${company}  |  ${siteName}  |  ${title}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth * 0.75, lineBreak: false });
+      doc.page.margins = { ...doc.page.margins, bottom: 0 };
+      const footerY = LETTERHEAD_FOOTER_Y;
+      text(`${siteName}  |  ${title}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth * 0.75, lineBreak: false });
       text(`Page ${i + 1} of ${pages.count}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth, align: 'right', lineBreak: false });
     }
 
