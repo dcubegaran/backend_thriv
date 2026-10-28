@@ -12,7 +12,7 @@ exports.getUsers = async (req, res) => {
   }
 };
 
-// POST /api/users - admin only (creates superadmins, admins or supervisors)
+// POST /api/users - admin only (creates admins or supervisors; superadmins can't be created here)
 exports.createUser = async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
@@ -22,8 +22,8 @@ exports.createUser = async (req, res) => {
     if (!isValidEmail(email)) {
       return res.status(400).json({ success: false, message: 'Invalid email format' });
     }
-    if (!['superadmin', 'admin', 'supervisor'].includes(role)) {
-      return res.status(400).json({ success: false, message: 'Role must be superadmin, admin or supervisor' });
+    if (!['admin', 'supervisor'].includes(role)) {
+      return res.status(400).json({ success: false, message: 'Role must be admin or supervisor' });
     }
     const exists = await User.findOne({ email: email.toLowerCase().trim() });
     if (exists) {
