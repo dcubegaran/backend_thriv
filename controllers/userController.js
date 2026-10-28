@@ -2,17 +2,18 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { isValidEmail } = require('../utils/validate');
 
-// GET /api/users - superadmin only
+// GET /api/users - superadmin and admin (admins don't see superadmin accounts)
 exports.getUsers = async (req, res) => {
   try {
-    const users = await User.find({}, '-passwordHash').sort({ createdAt: -1 });
+    const filter = req.user.role === 'superadmin' ? {} : { role: { $ne: 'superadmin' } };
+    const users = await User.find(filter, '-passwordHash').sort({ createdAt: -1 });
     res.json({ success: true, users });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to get users' });
   }
 };
 
-// POST /api/users - superadmin only
+// POST /api/users - superadmin and admin (creates admins or supervisors)
 exports.createUser = async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
@@ -40,8 +41,8 @@ exports.createUser = async (req, res) => {
   }
 };
 
-// PUT /api/users/:id/password - superadmin only
-// Superadmin must supply the target user's CURRENT password
+// PUT /api/users/:id/password - superadmin and admin (admins can't change a superadmin's password)
+// The caller must supply the target user's CURRENT password
 exports.updatePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -51,6 +52,9 @@ exports.updatePassword = async (req, res) => {
     const user = await User.findById(req.params.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    if (user.role === 'superadmin' && req.user.role !== 'superadmin') {
+      return res.status(403).json({ success: false, message: 'Access denied' });
     }
     const match = await bcrypt.compare(currentPassword, user.passwordHash);
     if (!match) {
@@ -64,8 +68,8 @@ exports.updatePassword = async (req, res) => {
   }
 };
 
-// DELETE /api/users/:id - superadmin only
-// Superadmin must supply the target user's current password to confirm
+// DELETE /api/users/:id - superadmin and admin (superadmin accounts can't be deleted)
+// The caller must supply the target user's current password to confirm
 exports.deleteUser = async (req, res) => {
   try {
     const { password } = req.body;

@@ -19,8 +19,8 @@ router.get('/supervisors', protect, requireRole('superadmin', 'admin'), async (r
   }
 });
 
-// All routes below require superadmin
-router.use(protect, requireRole('superadmin'));
+// User management: superadmin and admin (admins can't see or change superadmin accounts - see the controller)
+router.use(protect, requireRole('superadmin', 'admin'));
 router.get('/', getUsers);
 router.post('/', createUser);
 router.put('/:id/password', updatePassword);
