@@ -2,18 +2,17 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { isValidEmail } = require('../utils/validate');
 
-// GET /api/users - superadmin and admin (admins don't see superadmin accounts)
+// GET /api/users - superadmin and admin
 exports.getUsers = async (req, res) => {
   try {
-    const filter = req.user.role === 'superadmin' ? {} : { role: { $ne: 'superadmin' } };
-    const users = await User.find(filter, '-passwordHash').sort({ createdAt: -1 });
+    const users = await User.find({}, '-passwordHash').sort({ createdAt: -1 });
     res.json({ success: true, users });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to get users' });
   }
 };
 
-// POST /api/users - superadmin and admin (creates admins or supervisors)
+// POST /api/users - admin only (creates superadmins, admins or supervisors)
 exports.createUser = async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
@@ -23,8 +22,8 @@ exports.createUser = async (req, res) => {
     if (!isValidEmail(email)) {
       return res.status(400).json({ success: false, message: 'Invalid email format' });
     }
-    if (!['admin', 'supervisor'].includes(role)) {
-      return res.status(400).json({ success: false, message: 'Role must be admin or supervisor' });
+    if (!['superadmin', 'admin', 'supervisor'].includes(role)) {
+      return res.status(400).json({ success: false, message: 'Role must be superadmin, admin or supervisor' });
     }
     const exists = await User.findOne({ email: email.toLowerCase().trim() });
     if (exists) {
@@ -41,7 +40,7 @@ exports.createUser = async (req, res) => {
   }
 };
 
-// PUT /api/users/:id/password - superadmin and admin (admins can't change a superadmin's password)
+// PUT /api/users/:id/password - admin only (a superadmin's password can't be changed here)
 // The caller must supply the target user's CURRENT password
 exports.updatePassword = async (req, res) => {
   try {
@@ -53,7 +52,7 @@ exports.updatePassword = async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-    if (user.role === 'superadmin' && req.user.role !== 'superadmin') {
+    if (user.role === 'superadmin') {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     const match = await bcrypt.compare(currentPassword, user.passwordHash);
@@ -68,7 +67,7 @@ exports.updatePassword = async (req, res) => {
   }
 };
 
-// DELETE /api/users/:id - superadmin and admin (superadmin accounts can't be deleted)
+// DELETE /api/users/:id - admin only (superadmin accounts can't be deleted)
 // The caller must supply the target user's current password to confirm
 exports.deleteUser = async (req, res) => {
   try {

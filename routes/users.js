@@ -19,9 +19,11 @@ router.get('/supervisors', protect, requireRole('superadmin', 'admin'), async (r
   }
 });
 
-// User management: superadmin and admin (admins can't see or change superadmin accounts - see the controller)
-router.use(protect, requireRole('superadmin', 'admin'));
-router.get('/', getUsers);
+// User list: admins (Users page) and superadmins (assigning users to a site)
+router.get('/', protect, requireRole('superadmin', 'admin'), getUsers);
+
+// User management is done by admins only (superadmins no longer have a Users page)
+router.use(protect, requireRole('admin'));
 router.post('/', createUser);
 router.put('/:id/password', updatePassword);
 router.delete('/:id', deleteUser);
