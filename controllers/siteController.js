@@ -35,12 +35,15 @@ const shiftDay = (ymd, days) => {
   return d.toISOString().slice(0, 10);
 };
 
-// Returns an error message when the entry date is not allowed for this user, otherwise null
-function checkEntryDate(user, date) {
-  if (user.role !== 'supervisor') return null;
+// Returns an error message when the entry date is not allowed for this user, otherwise null.
+// No role may add an entry dated before the site's start date.
+function checkEntryDate(user, date, site) {
   const today = todayInBusinessTz();
+  if (date && Number.isNaN(new Date(date).getTime())) return 'Invalid date';
   const day = date ? new Date(date).toISOString().slice(0, 10) : today;
-  if (Number.isNaN(new Date(day).getTime())) return 'Invalid date';
+  const siteStart = site?.startDate ? new Date(site.startDate).toISOString().slice(0, 10) : null;
+  if (siteStart && day < siteStart) return 'Date cannot be before the site start date';
+  if (user.role !== 'supervisor') return null;
   const weekStart = shiftDay(today, -new Date(`${today}T00:00:00.000Z`).getUTCDay()); // this week's Sunday
   if (day > today) return 'Future dates cannot be added';
   if (day < weekStart) return 'Supervisors can only add entries for the current week (Sunday to Saturday)';
@@ -287,7 +290,7 @@ exports.downloadTablePdf = async (req, res) => {
     if (!canAccessSite(req.user, site)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
-    const { title, subtitle, meta, headers, rows, numeric, footer, filename, letterhead } = req.body || {};
+    const { title, subtitle, meta, headers, rows, numeric, footer, notes, filename, letterhead } = req.body || {};
     const cell = v => String(v ?? '').slice(0, 500);
     if (!Array.isArray(headers) || headers.length === 0 || headers.length > 12 || !Array.isArray(rows) || rows.length > 5000) {
       return res.status(400).json({ success: false, message: 'Invalid table' });
@@ -302,6 +305,10 @@ exports.downloadTablePdf = async (req, res) => {
       rows: rows.map(r => Array.from({ length: width }, (_, i) => cell(Array.isArray(r) ? r[i] : ''))),
       numeric: Array.isArray(numeric) ? numeric.filter(n => Number.isInteger(n)) : [],
       footer: Array.isArray(footer) ? Array.from({ length: width }, (_, i) => cell(footer[i])) : null,
+      notes: Array.isArray(notes) ? notes.slice(0, 5).map(n => ({
+        text: cell(n && typeof n === 'object' ? n.text : n),
+        bold: Boolean(n?.bold), danger: Boolean(n?.danger), small: Boolean(n?.small),
+      })) : [],
       letterhead,
     });
     const safeName = String(filename || 'entries').replace(/[^\w.-]+/g, '_').slice(0, 120);
@@ -480,7 +487,7 @@ exports.addLabour = async (req, res) => {
     const worker = await Worker.findById(workerId);
     if (!labourType) return res.status(404).json({ success: false, message: 'Labour type not found' });
     if (!worker) return res.status(404).json({ success: false, message: 'Worker not found' });
-    const dateError = checkEntryDate(req.user, date);
+    const dateError = checkEntryDate(req.user, date, site);
     if (dateError) return res.status(400).json({ success: false, message: dateError });
     const entryDate = date ? new Date(date) : new Date();
     if (await LabourLog.exists({ siteId: site._id, workerId, date: sameDayRange(entryDate) })) {
@@ -658,7 +665,7 @@ exports.addMaterial = async (req, res) => {
     }
     const material = await Material.findById(materialId);
     if (!material) return res.status(404).json({ success: false, message: 'Material not found' });
-    const dateError = checkEntryDate(req.user, date);
+    const dateError = checkEntryDate(req.user, date, site);
     if (dateError) return res.status(400).json({ success: false, message: dateError });
 
     const discountNum = Number(discount) || 0;
@@ -727,14 +734,14 @@ exports.addUnexpectedCost = async (req, res) => {
     if (isNaN(amount) || Number(amount) < 0) {
       return res.status(400).json({ success: false, message: 'Amount must be a non-negative number' });
     }
-    const dateError = checkEntryDate(req.user, date);
+    const dateError = checkEntryDate(req.user, date, site);
     if (dateError) return res.status(400).json({ success: false, message: dateError });
     const entryDate = date ? new Date(date) : new Date();
     const duplicate = await UnexpectedCost.exists({
       siteId: site._id, name: sameNameRegex(name), amount: Number(amount), date: sameDayRange(entryDate),
     });
     if (duplicate) {
-      return res.status(400).json({ success: false, message: 'The same unexpected cost already exists for this date' });
+      return res.status(400).json({ success: false, message: 'The same additional cost already exists for this date' });
     }
     const cost = await UnexpectedCost.create({
       siteId: site._id,
@@ -746,7 +753,7 @@ exports.addUnexpectedCost = async (req, res) => {
     });
     res.status(201).json({ success: true, unexpectedCost: cost });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to add unexpected cost' });
+    res.status(500).json({ success: false, message: 'Failed to add additional cost' });
   }
 };
 
@@ -764,7 +771,7 @@ exports.getUnexpectedCosts = async (req, res) => {
     const costs = await UnexpectedCost.find({ siteId: req.params.id }).sort({ date: -1 });
     res.json({ success: true, unexpectedCosts: costs });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to get unexpected costs' });
+    res.status(500).json({ success: false, message: 'Failed to get additional costs' });
   }
 };
 
@@ -799,7 +806,7 @@ exports.addContract = async (req, res) => {
     if (!nameSnapshot || !String(nameSnapshot).trim()) {
       return res.status(400).json({ success: false, message: 'Contract type name required' });
     }
-    const dateError = checkEntryDate(req.user, date);
+    const dateError = checkEntryDate(req.user, date, site);
     if (dateError) return res.status(400).json({ success: false, message: dateError });
     const entryDate = date ? new Date(date) : new Date();
     const contract = await SiteContract.create({
@@ -891,7 +898,7 @@ exports.addExtraExpense = async (req, res) => {
     const { name, remarks, amount, date } = req.body;
     const fieldError = extraExpenseError(req.body);
     if (fieldError) return res.status(400).json({ success: false, message: fieldError });
-    const dateError = checkEntryDate(req.user, date);
+    const dateError = checkEntryDate(req.user, date, site);
     if (dateError) return res.status(400).json({ success: false, message: dateError });
     const entryDate = date ? new Date(date) : new Date();
     const expense = await ExtraExpense.create({
@@ -969,7 +976,7 @@ const makeDeleteHandler = (Model, label, afterDelete) => async (req, res) => {
 
 exports.deleteLabourLog = makeDeleteHandler(LabourLog, 'Labour entry', log => Attendance.deleteOne({ labourLogId: log._id }));
 exports.deleteMaterialLog = makeDeleteHandler(MaterialLog, 'Material entry');
-exports.deleteUnexpectedCost = makeDeleteHandler(UnexpectedCost, 'Unexpected cost');
+exports.deleteUnexpectedCost = makeDeleteHandler(UnexpectedCost, 'Additional cost');
 exports.deleteContract = makeDeleteHandler(SiteContract, 'Contract');
 exports.deleteExtraExpense = makeDeleteHandler(ExtraExpense, 'Extra expense');
 
@@ -1030,7 +1037,7 @@ exports.updateUnexpectedCost = async (req, res) => {
     const site = await loadAccessibleSite(req, res);
     if (!site) return;
     const cost = await UnexpectedCost.findOne({ _id: req.params.entryId, siteId: site._id });
-    if (!cost) return res.status(404).json({ success: false, message: 'Unexpected cost not found' });
+    if (!cost) return res.status(404).json({ success: false, message: 'Additional cost not found' });
     const { name, remarks, amount, date } = req.body;
     const fieldError = extraExpenseError(req.body);
     if (fieldError) return res.status(400).json({ success: false, message: fieldError });
@@ -1040,7 +1047,7 @@ exports.updateUnexpectedCost = async (req, res) => {
       _id: { $ne: cost._id }, siteId: site._id, name: sameNameRegex(name), amount: Number(amount), date: sameDayRange(entryDate),
     });
     if (duplicate) {
-      return res.status(400).json({ success: false, message: 'The same unexpected cost already exists for this date' });
+      return res.status(400).json({ success: false, message: 'The same additional cost already exists for this date' });
     }
     cost.name = String(name).trim();
     cost.remarks = remarks || '';
@@ -1049,7 +1056,7 @@ exports.updateUnexpectedCost = async (req, res) => {
     await cost.save();
     res.json({ success: true, unexpectedCost: cost });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to update unexpected cost' });
+    res.status(500).json({ success: false, message: 'Failed to update additional cost' });
   }
 };
 

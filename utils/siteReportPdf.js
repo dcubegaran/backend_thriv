@@ -348,7 +348,8 @@ async function generateSiteReportPDF(data) {
  * Generic table PDF (the entries tabs on the site page: labour, material, unexpected costs, contracts).
  * The page sends the rows exactly as shown on screen, already formatted.
  * data: { company, siteName, title, subtitle, meta: [string], headers: [string], rows: [[string]],
- *         numeric: [columnIndex], footer: [string] | null }
+ *         numeric: [columnIndex], footer: [string] | null,
+ *         notes: [string | { text, bold, danger, small }] (lines under the table) }
  */
 async function generateTablePDF(data) {
   const letterheadFile = await loadLetterhead(data.letterhead);
@@ -362,6 +363,7 @@ async function generateTablePDF(data) {
       company = 'Balu Hari Builders', siteName = '', title = '', subtitle = '', meta = [],
       headers = [], rows = [], numeric = [], footer = null, letterhead,
     } = data;
+    const notes = Array.isArray(data.notes) ? data.notes.filter(n => n && (typeof n === 'string' || n.text)) : [];
 
     // Portrait, to match the letter pad behind every page
     const margin = PAGE_MARGIN - 14;
@@ -386,7 +388,8 @@ async function generateTablePDF(data) {
     const latinFont = bold => (bold ? 'Helvetica-Bold' : 'Helvetica');
     const tamilFont = bold => (bold ? tamilBold : tamilRegular);
     // Helvetica has no rupee glyph
-    const clean = value => String(value ?? '').replace(/₹\s?/g, 'Rs. ');
+    // Helvetica has no warning-sign glyph either
+    const clean = value => String(value ?? '').replace(/₹\s?/g, 'Rs. ').replace(/⚠️?\s?/g, '! ');
 
     const text = (value, x, yPos, { size = 10, bold = false, color = COLORS.dark, ...options } = {}) => {
       const str = clean(value);
@@ -418,16 +421,32 @@ async function generateTablePDF(data) {
       doc.moveTo(left, yPos).lineTo(left + contentWidth, yPos).strokeColor(color).lineWidth(width).stroke();
     };
 
-    // Column widths follow the content, capped so one long column can't squeeze the rest
+    // Column widths follow the content, capped so one long column can't squeeze the rest.
+    // Each column is kept at least as wide as its (uppercase) header so headers stay on one line,
+    // and amount columns as wide as their longest amount (including the Total row).
     const FONT = 9.5;
     const PAD = 8;
-    const natural = headers.map((h, i) => {
-      const cells = [h, ...rows.map(r => r[i]), ...(footer ? [footer[i]] : [])];
-      const widest = Math.max(...cells.map(c => measureWidth(c, FONT, true)));
-      return Math.min(Math.max(widest + PAD, 50), 220);
+    const headerMin = headers.map((h, i) => {
+      const headerWidth = measureWidth(h.toUpperCase(), 8.5, true);
+      if (!numeric.includes(i)) return headerWidth + PAD + 2;
+      const cells = [...rows.map(r => r[i]), ...(footer ? [footer[i]] : [])];
+      return Math.max(headerWidth, ...cells.map(c => measureWidth(c, FONT, true))) + PAD + 2;
     });
-    const scale = contentWidth / natural.reduce((a, b) => a + b, 0);
-    const widths = natural.map(w => w * scale);
+    const natural = headers.map((h, i) => {
+      const cells = [...rows.map(r => r[i]), ...(footer ? [footer[i]] : [])];
+      const widest = Math.max(0, ...cells.map(c => measureWidth(c, FONT, true)));
+      return Math.max(Math.min(Math.max(widest + PAD, 50), 220), headerMin[i]);
+    });
+    const total = natural.reduce((a, b) => a + b, 0);
+    const minTotal = headerMin.reduce((a, b) => a + b, 0);
+    let widths;
+    if (total <= contentWidth || minTotal >= contentWidth) {
+      widths = natural.map(w => w * (contentWidth / total));
+    } else {
+      // Too wide: shrink only the room above each header's minimum
+      const shrink = (total - contentWidth) / (total - minTotal);
+      widths = natural.map((w, i) => w - (w - headerMin[i]) * shrink);
+    }
     const xs = widths.map((_, i) => left + widths.slice(0, i).reduce((a, b) => a + b, 0));
     const align = i => (numeric.includes(i) ? 'right' : 'left');
 
@@ -477,6 +496,20 @@ async function generateTablePDF(data) {
       footer.forEach((c, i) => text(c, xs[i] + PAD / 2, y + 6, { size: FONT, bold: true, color: COLORS.accent, width: widths[i] - PAD, align: align(i) }));
       y += height;
     }
+
+    // ---- Notes under the table (e.g. contract balance and the advance warning) ----
+    if (notes.length) y += 8;
+    notes.forEach(note => {
+      const line = typeof note === 'string' ? { text: note } : note;
+      const size = line.small ? 8.5 : 10;
+      const height = measureHeight(line.text, contentWidth, size, line.bold) + 4;
+      if (y + height > bottomLimit) {
+        doc.addPage();
+        y = TOP;
+      }
+      text(line.text, left, y, { size, bold: Boolean(line.bold), color: line.danger ? COLORS.danger : COLORS.accent, width: contentWidth, align: 'right' });
+      y += height;
+    });
 
     // ---- Footer on every page ----
     const pages = doc.bufferedPageRange();

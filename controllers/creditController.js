@@ -48,6 +48,9 @@ exports.createCredit = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     const entryDate = date ? new Date(date) : new Date();
+    if (site.startDate && date && String(date).slice(0, 10) < new Date(site.startDate).toISOString().slice(0, 10)) {
+      return res.status(400).json({ success: false, message: 'Date cannot be before the site start date' });
+    }
     const duplicate = await Credit.exists({
       siteId, shopName: sameNameRegex(shopName), amount: Number(amount), date: sameDayRange(entryDate),
     });
@@ -85,5 +88,23 @@ exports.closeCredit = async (req, res) => {
     res.json({ success: true, credit });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to close credit' });
+  }
+};
+
+// DELETE /api/credits/:id - admins only, and only closed credits
+exports.deleteCredit = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const credit = await Credit.findById(req.params.id);
+    if (!credit) return res.status(404).json({ success: false, message: 'Credit not found' });
+    if (credit.status !== 'closed') {
+      return res.status(400).json({ success: false, message: 'Only closed credits can be deleted' });
+    }
+    await credit.deleteOne();
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete credit' });
   }
 };
