@@ -17,9 +17,18 @@ const quoteLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Downloads get their own, larger allowance so English + Tamil after a few quotes isn't blocked
+const quotePdfLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { success: false, message: 'Too many downloads, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // Public routes
 router.post('/public', quoteLimiter, submitPublicQuote);
-router.post('/public/pdf', quoteLimiter, generatePublicPDF);
+router.post('/public/pdf', quotePdfLimiter, generatePublicPDF);
 
 // Protected routes - superadmin, admin, supervisor
 router.post('/manual', protect, requireRole('superadmin', 'admin', 'supervisor'), async (req, res) => {
