@@ -93,9 +93,14 @@ async function generateQuotePDF(quoteData) {
     const source = dbImages.get(url) || resolveUploadImage(url);
     if (!source) continue;
     try {
-      pdfImages.set(url, Buffer.isBuffer(source) || /\.webp$/i.test(url)
-        ? await sharp(source).png().toBuffer()
-        : source);
+      // Shrink to print size (photos sit three to a row) and store as JPEG. Full-size phone
+      // photos turned into PNGs used hundreds of MB and could crash the small server mid-download.
+      pdfImages.set(url, await sharp(source)
+        .rotate()
+        .resize({ width: 900, height: 900, fit: 'inside', withoutEnlargement: true })
+        .flatten({ background: '#ffffff' })
+        .jpeg({ quality: 78 })
+        .toBuffer());
     } catch (err) {
       // Unsupported or missing image data should not prevent quote generation.
     }
