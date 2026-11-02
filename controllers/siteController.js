@@ -743,7 +743,8 @@ exports.getUnexpectedCosts = async (req, res) => {
   }
 };
 
-// Labour Contract Attendance on a contract: body.labourAttendance = { labourContractId, workerIds: [...] }, or null for none.
+// Labour Contract Attendance on a contract: body.labourAttendance = { labourContractId, workerIds: [...], workerRemarks?: [...] }
+// (remarks line up with workerIds), or null for none.
 // Returns { value } (undefined = not sent, null = none) or { error }.
 async function readLabourAttendance(body) {
   const input = body.labourAttendance;
@@ -751,6 +752,7 @@ async function readLabourAttendance(body) {
   if (!input) return { value: null };
   const { labourContractId } = input;
   const workerIds = Array.isArray(input.workerIds) ? input.workerIds.map(String) : [];
+  const workerRemarks = Array.isArray(input.workerRemarks) ? input.workerRemarks : [];
   if (!labourContractId || !isValidObjectId(labourContractId)) return { error: 'Select a labour contract' };
   if (!workerIds.length || workerIds.some(w => !isValidObjectId(w))) return { error: 'Select a name for each worker' };
   if (new Set(workerIds).size !== workerIds.length) return { error: 'The same worker is selected more than once' };
@@ -763,7 +765,7 @@ async function readLabourAttendance(body) {
     value: {
       labourContractId: labourContract._id,
       labourContractName: labourContract.name,
-      workers: workerIds.map(id => ({ workerId: byId.get(id)._id, name: byId.get(id).name })),
+      workers: workerIds.map((id, i) => ({ workerId: byId.get(id)._id, name: byId.get(id).name, remarks: String(workerRemarks[i] || '').trim().slice(0, 1000) })),
     },
   };
 }
@@ -1190,6 +1192,31 @@ exports.deleteContract = makeDeleteHandler(SiteContract, 'Contract');
 exports.deleteExtraExpense = makeDeleteHandler(ExtraExpense, 'Extra expense');
 exports.deleteSiteNote = makeDeleteHandler(SiteNote, 'Note');
 exports.deleteSiteAttendance = makeDeleteHandler(SiteAttendance, 'Attendance');
+
+// DELETE /api/sites/:id/contracts/:entryId/attendance/:workerId - takes one worker off a contract's
+// Labour Contract Attendance (same delete rules as entries). The last worker removed clears it.
+exports.deleteContractAttendanceWorker = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.entryId) || !isValidObjectId(req.params.workerId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const contract = await SiteContract.findOne({ _id: req.params.entryId, siteId: site._id });
+    if (!contract) return res.status(404).json({ success: false, message: 'Contract not found' });
+    const dateError = checkDeleteDate(req.user, contract.date);
+    if (dateError) return res.status(403).json({ success: false, message: dateError });
+    const workers = contract.labourAttendance?.workers || [];
+    const remaining = workers.filter(w => String(w.workerId) !== req.params.workerId);
+    if (remaining.length === workers.length) return res.status(404).json({ success: false, message: 'Attendance not found' });
+    if (remaining.length) contract.labourAttendance.workers = remaining;
+    else contract.labourAttendance = undefined;
+    await contract.save();
+    res.json({ success: true, message: 'Attendance deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete attendance' });
+  }
+};
 
 // PUT /api/sites/:id/material/:entryId - admin / superadmin only (enforced in the route)
 exports.updateMaterialLog = async (req, res) => {

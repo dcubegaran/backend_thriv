@@ -6,7 +6,7 @@ const {
   addLabour, getLabourLogs, updateLabourPaid, updateLabourLog, deleteLabourLog,
   addMaterial, getMaterialLogs, updateMaterialLog, deleteMaterialLog,
   addUnexpectedCost, getUnexpectedCosts, updateUnexpectedCost, deleteUnexpectedCost,
-  addContract, getContracts, markContractPaid, updateContract, deleteContract,
+  addContract, getContracts, markContractPaid, updateContract, deleteContract, deleteContractAttendanceWorker,
   addExtraExpense, getExtraExpenses, updateExtraExpense, deleteExtraExpense,
   addSiteNote, getSiteNotes, updateSiteNote, deleteSiteNote,
   getLabourAdvances, saveLabourAdvance,
@@ -51,6 +51,7 @@ router.get('/:id/contracts', getContracts);
 router.patch('/:id/contracts/:entryId/paid', markContractPaid);
 router.put('/:id/contracts/:entryId', canEdit, updateContract);
 router.delete('/:id/contracts/:entryId', canDelete, deleteContract);
+router.delete('/:id/contracts/:entryId/attendance/:workerId', canDelete, deleteContractAttendanceWorker);
 
 router.post('/:id/extra-expenses', addExtraExpense);
 router.get('/:id/extra-expenses', getExtraExpenses);

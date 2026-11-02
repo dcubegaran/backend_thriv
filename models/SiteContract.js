@@ -8,6 +8,7 @@ const labourAttendanceSchema = new mongoose.Schema({
     _id: false,
     workerId: { type: mongoose.Schema.Types.ObjectId, ref: 'LabourContractWorker', required: true },
     name: { type: String, required: true },
+    remarks: { type: String, default: '' },
   }],
 }, { _id: false });
 
