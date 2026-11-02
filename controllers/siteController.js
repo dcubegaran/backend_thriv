@@ -4,6 +4,9 @@ const MaterialLog = require('../models/MaterialLog');
 const UnexpectedCost = require('../models/UnexpectedCost');
 const SiteContract = require('../models/SiteContract');
 const ExtraExpense = require('../models/ExtraExpense');
+const SiteNote = require('../models/SiteNote');
+const LabourAdvance = require('../models/LabourAdvance');
+const { buildAttendanceRows, labourSpend, weekStartOf } = require('../utils/labourAdvance');
 const Attendance = require('../models/Attendance');
 const LabourType = require('../models/LabourType');
 const Worker = require('../models/Worker');
@@ -63,16 +66,16 @@ function checkDeleteDate(user, date) {
 
 // Compute spend totals for a site
 async function getSiteSpend(siteId) {
-  const [labourLogs, materialLogs, unexpectedCosts, contracts, extraExpenses] = await Promise.all([
+  const [labourLogs, materialLogs, unexpectedCosts, contracts, extraExpenses, labourAdvances] = await Promise.all([
     LabourLog.find({ siteId }),
     MaterialLog.find({ siteId }),
     UnexpectedCost.find({ siteId }),
     SiteContract.find({ siteId }),
     ExtraExpense.find({ siteId }),
+    LabourAdvance.find({ siteId }),
   ]);
-  const labourTotal = labourLogs.reduce((sum, log) => (
-    sum + Number(log.paid ? log.totalAmount : log.advancePaid || 0)
-  ), 0);
+  // Advances given plus salary paid (weekly advance totals replace per-day advances; see utils/labourAdvance)
+  const labourTotal = labourSpend(labourLogs, labourAdvances);
   const materialTotal = materialLogs.reduce((sum, m) => sum + m.totalAmount, 0);
   const unexpectedTotal = unexpectedCosts.reduce((sum, u) => sum + u.amount, 0);
   const contractTotal = contracts.reduce((sum, contract) => (
@@ -152,15 +155,14 @@ exports.getSite = async (req, res) => {
   }
 };
 
-// POST /api/sites/:id/report-pdf   body: { start, end, advances }
-// start/end are YYYY-MM-DD. `advances` maps a worker+labour-type key to the advance
-// entered on the site page (advances aren't stored, so the page sends what it shows).
+// POST /api/sites/:id/report-pdf   body: { start, end, letterhead }
+// start/end are YYYY-MM-DD. Advances come from the saved weekly totals (see labour-advances below).
 exports.downloadSiteReport = async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: 'Invalid site ID' });
     }
-    const { start, end, advances, letterhead } = req.body || {};
+    const { start, end, letterhead } = req.body || {};
     const dateFormat = /^\d{4}-\d{2}-\d{2}$/;
     if (!dateFormat.test(start || '') || !dateFormat.test(end || '')) {
       return res.status(400).json({ success: false, message: 'Start and end dates are required (YYYY-MM-DD)' });
@@ -182,9 +184,11 @@ exports.downloadSiteReport = async (req, res) => {
     }
 
     const dateRange = { $gte: from, $lte: to };
-    const [labourLogs, credits] = await Promise.all([
+    const [labourLogs, labourAdvances, credits] = await Promise.all([
       LabourLog.find({ siteId: site._id, date: dateRange }).sort({ date: 1 }),
-      Credit.find({ siteId: site._id, date: dateRange }).sort({ date: 1 }),
+      LabourAdvance.find({ siteId: site._id }),
+      // Every credit still open on the site, whatever its date; closed ones are left out
+      Credit.find({ siteId: site._id, status: 'open' }).sort({ date: 1 }),
     ]);
 
     // Group attendance by date, then by labour type: how many were present that day
@@ -203,50 +207,8 @@ exports.downloadSiteReport = async (req, res) => {
         .sort((a, b) => a.labourType.localeCompare(b.labourType)),
     }));
 
-    // Worker-wise summary, same grouping as the Weekly Attendance table on the site page
-    const hasAdvanceOverride = key => advances && typeof advances === 'object'
-      && Object.prototype.hasOwnProperty.call(advances, key);
-    const advanceFor = key => {
-      const value = Number(advances && typeof advances === 'object' ? advances[key] : 0);
-      return Number.isFinite(value) && value > 0 ? value : 0;
-    };
-    const workerRows = new Map();
-    labourLogs.forEach(log => {
-      const key = `${log.workerId || log.workerNameSnapshot}-${log.labourTypeId || log.labourTypeNameSnapshot}`;
-      const row = workerRows.get(key) || {
-        key,
-        workerName: log.workerNameSnapshot,
-        labourType: log.labourTypeNameSnapshot,
-        days: 0,
-        totalSalary: 0,
-        advancePaid: 0,
-        unpaidSalary: 0,
-        unpaidAdvancePaid: 0,
-        paid: true,
-      };
-      const salary = Number(log.totalAmount || 0);
-      const advance = Number(log.advancePaid || 0);
-      row.days += Number(log.days || 0);
-      row.totalSalary += salary;
-      row.advancePaid += advance;
-      row.paid = row.paid && Boolean(log.paid);
-      if (!log.paid) {
-        row.unpaidSalary += salary;
-        row.unpaidAdvancePaid += advance;
-      }
-      workerRows.set(key, row);
-    });
-    const workers = [...workerRows.values()]
-      .map(row => {
-        if (hasAdvanceOverride(row.key)) {
-          row.advancePaid = advanceFor(row.key);
-        }
-        const advanceAgainstUnpaid = hasAdvanceOverride(row.key)
-          ? row.advancePaid
-          : row.unpaidAdvancePaid;
-        return { ...row, remaining: Math.max(row.unpaidSalary - advanceAgainstUnpaid, 0) };
-      })
-      .sort((a, b) => a.workerName.localeCompare(b.workerName));
+    // Worker-wise summary, same as the Weekly Attendance table on the site page (saved weekly advances)
+    const workers = buildAttendanceRows(labourLogs, labourAdvances, start, end);
 
     const pdf = await generateSiteReportPDF({
       range: { start, end },
@@ -437,36 +399,6 @@ exports.addValuation = async (req, res) => {
   }
 };
 
-// PUT /api/sites/:id/notes   body: { title, notes } - saves the site's shared notepad
-exports.saveSiteNotes = async (req, res) => {
-  try {
-    if (!isValidObjectId(req.params.id)) {
-      return res.status(400).json({ success: false, message: 'Invalid site ID' });
-    }
-    const title = String(req.body.title ?? '').trim();
-    const notes = String(req.body.notes ?? '');
-    if (title.length > 200) {
-      return res.status(400).json({ success: false, message: 'Title is too long (max 200 characters)' });
-    }
-    if (notes.length > 20000) {
-      return res.status(400).json({ success: false, message: 'Notes are too long (max 20,000 characters)' });
-    }
-    const site = await Site.findById(req.params.id);
-    if (!site) return res.status(404).json({ success: false, message: 'Site not found' });
-    if (!canAccessSite(req.user, site)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
-    site.notesTitle = title;
-    site.notes = notes;
-    site.notesUpdatedAt = new Date();
-    site.notesUpdatedBy = req.user._id;
-    await site.save();
-    res.json({ success: true, notesTitle: site.notesTitle, notes: site.notes, notesUpdatedAt: site.notesUpdatedAt });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to save notes' });
-  }
-};
-
 // DELETE /api/sites/:id - removes the site and everything recorded against it
 exports.deleteSite = async (req, res) => {
   try {
@@ -486,6 +418,8 @@ exports.deleteSite = async (req, res) => {
       UnexpectedCost.deleteMany({ siteId }),
       SiteContract.deleteMany({ siteId }),
       ExtraExpense.deleteMany({ siteId }),
+      SiteNote.deleteMany({ siteId }),
+      LabourAdvance.deleteMany({ siteId }),
       Credit.deleteMany({ siteId }),
     ]);
     await site.deleteOne();
@@ -540,7 +474,8 @@ exports.addLabour = async (req, res) => {
       days: Number(days),
       rateAtTime,
       totalAmount,
-      advancePaid: Math.min(parsedAdvance, totalAmount),
+      // The whole advance given is kept, even when it is more than this day's salary
+      advancePaid: Number.isFinite(parsedAdvance) && parsedAdvance > 0 ? parsedAdvance : 0,
       paid: isPaid,
       remarks: remarks || '',
       createdBy: req.user._id,
@@ -658,7 +593,6 @@ exports.updateLabourLog = async (req, res) => {
     log.days = nextDays;
     log.rateAtTime = rateAtTime;
     log.totalAmount = calcLabourTotal(nextDays, rateAtTime);
-    log.advancePaid = Math.min(Number(log.advancePaid || 0), log.totalAmount);
     if (remarks !== undefined) log.remarks = remarks || '';
     await log.save();
 
@@ -983,6 +917,138 @@ exports.updateExtraExpense = async (req, res) => {
   }
 };
 
+// GET /api/sites/:id/labour-advances - saved weekly advance totals: [{ workerKey, weekStart, amount }]
+exports.getLabourAdvances = async (req, res) => {
+  try {
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const advances = await LabourAdvance.find({ siteId: site._id }).select('workerKey weekStart amount');
+    res.json({ success: true, advances });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get advances' });
+  }
+};
+
+// PUT /api/sites/:id/labour-advances   body: { workerKey, weekStart, amount }
+// Saves one worker's total advance for a Monday–Sunday week; an empty amount removes it,
+// so that week goes back to the per-day advances from Add Labour.
+exports.saveLabourAdvance = async (req, res) => {
+  try {
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const workerKey = String(req.body.workerKey || '').trim();
+    const weekStart = String(req.body.weekStart || '');
+    if (!workerKey || workerKey.length > 200) return res.status(400).json({ success: false, message: 'Invalid worker' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStart) || Number.isNaN(new Date(`${weekStart}T00:00:00.000Z`).getTime()) || weekStartOf(weekStart) !== weekStart) {
+      return res.status(400).json({ success: false, message: 'Week must start on a Monday (YYYY-MM-DD)' });
+    }
+    const { amount } = req.body;
+    if (amount === '' || amount === null || amount === undefined) {
+      await LabourAdvance.deleteOne({ siteId: site._id, workerKey, weekStart });
+      return res.json({ success: true, advance: null });
+    }
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value < 0) return res.status(400).json({ success: false, message: 'Advance must be 0 or more' });
+    const advance = await LabourAdvance.findOneAndUpdate(
+      { siteId: site._id, workerKey, weekStart },
+      { $set: { amount: value, updatedBy: req.user._id } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    ).select('workerKey weekStart amount');
+    res.json({ success: true, advance });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to save advance' });
+  }
+};
+
+// Validates title/content from the request body; returns an error message or null
+function siteNoteError({ title, content }) {
+  const t = String(title ?? '').trim();
+  const c = String(content ?? '');
+  if (!t && !c.trim()) return 'Enter a title or some content';
+  if (t.length > 200) return 'Title is too long (max 200 characters)';
+  if (c.length > 20000) return 'Content is too long (max 20,000 characters)';
+  return null;
+}
+
+// Moves the old single notepad kept on the site (notesTitle / notes) into a dated note, once.
+// The update is atomic, so two requests at the same time can't both copy it.
+async function migrateLegacySiteNote(site) {
+  const old = await Site.findOneAndUpdate(
+    { _id: site._id, $or: [{ notes: { $nin: ['', null] } }, { notesTitle: { $nin: ['', null] } }] },
+    { $set: { notes: '', notesTitle: '' } },
+    { new: false }
+  );
+  if (!old) return;
+  await SiteNote.create({
+    siteId: site._id,
+    title: old.notesTitle || '',
+    content: old.notes || '',
+    date: old.notesUpdatedAt || new Date(),
+    createdBy: old.notesUpdatedBy || old.createdBy,
+  });
+}
+
+// POST /api/sites/:id/notes   body: { title, content, date }
+exports.addSiteNote = async (req, res) => {
+  try {
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const fieldError = siteNoteError(req.body);
+    if (fieldError) return res.status(400).json({ success: false, message: fieldError });
+    const { title, content, date } = req.body;
+    const dateError = checkEntryDate(req.user, date, site);
+    if (dateError) return res.status(400).json({ success: false, message: dateError });
+    const note = await SiteNote.create({
+      siteId: site._id,
+      title: String(title ?? '').trim(),
+      content: String(content ?? ''),
+      date: date ? new Date(date) : new Date(),
+      createdBy: req.user._id,
+    });
+    res.status(201).json({ success: true, note });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to add note' });
+  }
+};
+
+// GET /api/sites/:id/notes
+exports.getSiteNotes = async (req, res) => {
+  try {
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    await migrateLegacySiteNote(site);
+    const notes = await SiteNote.find({ siteId: site._id }).sort({ date: -1, createdAt: -1 });
+    res.json({ success: true, notes });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get notes' });
+  }
+};
+
+// PUT /api/sites/:id/notes/:entryId - admin / superadmin only (enforced in the route)
+exports.updateSiteNote = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.entryId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const note = await SiteNote.findOne({ _id: req.params.entryId, siteId: site._id });
+    if (!note) return res.status(404).json({ success: false, message: 'Note not found' });
+    const fieldError = siteNoteError(req.body);
+    if (fieldError) return res.status(400).json({ success: false, message: fieldError });
+    const { title, content, date } = req.body;
+    const entryDate = date ? new Date(date) : note.date;
+    if (Number.isNaN(entryDate.getTime())) return res.status(400).json({ success: false, message: 'Invalid date' });
+    note.title = String(title ?? '').trim();
+    note.content = String(content ?? '');
+    note.date = entryDate;
+    await note.save();
+    res.json({ success: true, note });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update note' });
+  }
+};
+
 // DELETE /api/sites/:id/<entries>/:entryId - admins delete any entry, supervisors only entries dated this week.
 // afterDelete runs extra cleanup (e.g. the attendance row created with a labour log).
 const makeDeleteHandler = (Model, label, afterDelete) => async (req, res) => {
@@ -1009,6 +1075,7 @@ exports.deleteMaterialLog = makeDeleteHandler(MaterialLog, 'Material entry');
 exports.deleteUnexpectedCost = makeDeleteHandler(UnexpectedCost, 'Other cost');
 exports.deleteContract = makeDeleteHandler(SiteContract, 'Contract');
 exports.deleteExtraExpense = makeDeleteHandler(ExtraExpense, 'Extra expense');
+exports.deleteSiteNote = makeDeleteHandler(SiteNote, 'Note');
 
 // PUT /api/sites/:id/material/:entryId - admin / superadmin only (enforced in the route)
 exports.updateMaterialLog = async (req, res) => {

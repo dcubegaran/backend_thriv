@@ -2,12 +2,14 @@ const express = require('express');
 const router = express.Router();
 const { protect, requireRole } = require('../middleware/auth');
 const {
-  getSites, getSite, downloadSiteReport, downloadTablePdf, createSite, updateSite, deleteSite, addValuation, saveSiteNotes,
+  getSites, getSite, downloadSiteReport, downloadTablePdf, createSite, updateSite, deleteSite, addValuation,
   addLabour, getLabourLogs, updateLabourPaid, updateLabourLog, deleteLabourLog,
   addMaterial, getMaterialLogs, updateMaterialLog, deleteMaterialLog,
   addUnexpectedCost, getUnexpectedCosts, updateUnexpectedCost, deleteUnexpectedCost,
   addContract, getContracts, markContractPaid, updateContract, deleteContract,
-  addExtraExpense, getExtraExpenses, updateExtraExpense, deleteExtraExpense
+  addExtraExpense, getExtraExpenses, updateExtraExpense, deleteExtraExpense,
+  addSiteNote, getSiteNotes, updateSiteNote, deleteSiteNote,
+  getLabourAdvances, saveLabourAdvance
 } = require('../controllers/siteController');
 
 // Entries: admins can edit and delete; supervisors can only delete entries dated this week (checked in the controller)
@@ -24,11 +26,12 @@ router.post('/:id/table-pdf', downloadTablePdf);
 router.put('/:id', updateSite);
 router.delete('/:id', requireRole('superadmin', 'admin'), deleteSite);
 router.post('/:id/valuation', requireRole('superadmin', 'admin'), addValuation);
-router.put('/:id/notes', saveSiteNotes);
 
 router.post('/:id/labour', addLabour);
 router.get('/:id/labour', getLabourLogs);
 router.patch('/:id/labour/paid', updateLabourPaid);
+router.get('/:id/labour-advances', getLabourAdvances);
+router.put('/:id/labour-advances', saveLabourAdvance);
 router.put('/:id/labour/:entryId', canEdit, updateLabourLog);
 router.delete('/:id/labour/:entryId', canDelete, deleteLabourLog);
 
@@ -52,5 +55,10 @@ router.post('/:id/extra-expenses', addExtraExpense);
 router.get('/:id/extra-expenses', getExtraExpenses);
 router.put('/:id/extra-expenses/:entryId', canEdit, updateExtraExpense);
 router.delete('/:id/extra-expenses/:entryId', canDelete, deleteExtraExpense);
+
+router.post('/:id/notes', addSiteNote);
+router.get('/:id/notes', getSiteNotes);
+router.put('/:id/notes/:entryId', canEdit, updateSiteNote);
+router.delete('/:id/notes/:entryId', canDelete, deleteSiteNote);
 
 module.exports = router;

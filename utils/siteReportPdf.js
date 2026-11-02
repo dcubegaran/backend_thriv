@@ -12,7 +12,11 @@ const COLORS = {
   headBg: '#e8eef5',
   danger: '#b42318',
   ok: '#1f8a4c',
+  due: '#1d4ed8',
 };
+
+// Remaining to pay: red when negative (advance more than salary), green when paid/settled, blue when still due
+const remainingColor = row => (row.remaining < 0 ? COLORS.danger : row.paid || row.remaining === 0 ? COLORS.ok : COLORS.due);
 
 const PAGE_MARGIN = 50;
 // The bundled Tamil font has Tamil glyphs only (no Latin letters or digits),
@@ -207,7 +211,7 @@ async function generateSiteReportPDF(data) {
         text(formatDays(row.days), cols[2].x + 4, y + 6, { size: 10, width: cols[2].width - 8, align: 'center', lineBreak: false });
         text(formatAmount(row.advancePaid), cols[3].x + 4, y + 6, amountOpts(cols[3]));
         text(formatAmount(row.totalSalary), cols[4].x + 4, y + 6, amountOpts(cols[4], { bold: true }));
-        text(formatAmount(row.remaining), cols[5].x + 4, y + 6, amountOpts(cols[5], { bold: true, color: row.remaining > 0 ? COLORS.danger : COLORS.ok }));
+        text(formatAmount(row.remaining), cols[5].x + 4, y + 6, amountOpts(cols[5], { bold: true, color: remainingColor(row) }));
         y += rowHeight;
         hr(y, '#e5e5e5', 0.5);
       });
@@ -222,6 +226,15 @@ async function generateSiteReportPDF(data) {
       text(formatAmount(sum('totalSalary')), cols[4].x + 4, y, amountOpts(cols[4], { bold: true, color: COLORS.accent }));
       text(formatAmount(sum('remaining')), cols[5].x + 4, y, amountOpts(cols[5], { bold: true, color: COLORS.accent }));
       y += 22;
+
+      const overAdvanced = workers.filter(row => row.remaining < 0);
+      if (overAdvanced.length) {
+        const warning = `Alert: advance is more than salary for ${overAdvanced.map(row => `${row.workerName} (${formatAmount(row.remaining)})`).join(', ')}`;
+        const height = measure(warning, contentWidth - 8, 10, true) + 6;
+        ensureSpace(height + 4);
+        text(warning, left + 4, y, { size: 10, bold: true, color: COLORS.danger, width: contentWidth - 8 });
+        y += height;
+      }
     }
     y += 12;
 
@@ -291,10 +304,10 @@ async function generateSiteReportPDF(data) {
     // ================= Credits (last) =================
     y += 10;
     ensureSpace(90);
-    section(`Credits  (${formatDate(range.start)} to ${formatDate(range.end)})`);
+    section('Open Credits');
 
     if (credits.length === 0) {
-      emptyNote('No credits in this period.');
+      emptyNote('No open credits.');
     } else {
       const cols = [
         { label: 'DATE', x: left, width: 100 },
@@ -319,13 +332,9 @@ async function generateSiteReportPDF(data) {
         hr(y, '#e5e5e5', 0.5);
       });
 
-      ensureSpace(50);
+      ensureSpace(30);
       y += 10;
-      const totalCredits = credits.reduce((sum, c) => sum + Number(c.amount || 0), 0);
-      text('Total Credits', left + 4, y, { size: 10, bold: true, width: 200, lineBreak: false });
-      text(formatAmount(totalCredits), left, y, { size: 10, bold: true, width: contentWidth - 4, align: 'right', lineBreak: false });
-      y += 18;
-      text('Open Credits', left + 4, y, { size: 10, bold: true, color: COLORS.danger, width: 200, lineBreak: false });
+      text('Total Open Credits', left + 4, y, { size: 10, bold: true, color: COLORS.danger, width: 200, lineBreak: false });
       text(formatAmount(openCredits), left, y, { size: 10, bold: true, color: COLORS.danger, width: contentWidth - 4, align: 'right', lineBreak: false });
       y += 18;
     }

@@ -23,7 +23,7 @@ const siteSchema = new mongoose.Schema({
   status: { type: String, enum: ['active', 'closed'], default: 'active' },
   assignedAdmins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   assignedSupervisors: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  // Plain-text notepad shared by everyone who can open the site
+  // Old single notepad: notes are now SiteNote entries; anything left here is moved there on first load
   notesTitle: { type: String, default: '', maxlength: 200 },
   notes: { type: String, default: '', maxlength: 20000 },
   notesUpdatedAt: { type: Date },
