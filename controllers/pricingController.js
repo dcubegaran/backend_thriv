@@ -2,6 +2,8 @@ const LabourType = require('../models/LabourType');
 const Worker = require('../models/Worker');
 const SqftPricing = require('../models/SqftPricing');
 const Material = require('../models/Material');
+const LabourContract = require('../models/LabourContract');
+const LabourContractWorker = require('../models/LabourContractWorker');
 const { isValidObjectId, sameNameRegex } = require('../utils/validate');
 
 // ---- Labour Types ----
@@ -134,6 +136,132 @@ exports.deleteWorker = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid ID' });
     }
     const worker = await Worker.findByIdAndDelete(req.params.id);
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker not found' });
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete worker' });
+  }
+};
+
+// ---- Labour Contracts (same as labour types, without a rate) ----
+
+exports.getLabourContracts = async (req, res) => {
+  try {
+    const labourContracts = await LabourContract.find({}).sort({ name: 1 });
+    res.json({ success: true, labourContracts });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get labour contracts' });
+  }
+};
+
+exports.createLabourContract = async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ success: false, message: 'Name required' });
+    if (await LabourContract.exists({ name: sameNameRegex(name) })) {
+      return res.status(400).json({ success: false, message: 'A labour contract with this name already exists' });
+    }
+    const labourContract = await LabourContract.create({ name });
+    res.status(201).json({ success: true, labourContract });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to create labour contract' });
+  }
+};
+
+exports.updateLabourContract = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ success: false, message: 'Name required' });
+    if (await LabourContract.exists({ _id: { $ne: req.params.id }, name: sameNameRegex(name) })) {
+      return res.status(400).json({ success: false, message: 'A labour contract with this name already exists' });
+    }
+    const labourContract = await LabourContract.findByIdAndUpdate(req.params.id, { name }, { new: true });
+    if (!labourContract) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, labourContract });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update labour contract' });
+  }
+};
+
+// Deletes the labour contract and its workers
+exports.deleteLabourContract = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const labourContract = await LabourContract.findByIdAndDelete(req.params.id);
+    if (!labourContract) return res.status(404).json({ success: false, message: 'Not found' });
+    await LabourContractWorker.deleteMany({ labourContractId: labourContract._id });
+    res.json({ success: true, message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to delete labour contract' });
+  }
+};
+
+// ---- Labour Contract workers ----
+
+exports.getLabourContractWorkers = async (req, res) => {
+  try {
+    const query = req.query.labourContractId ? { labourContractId: req.query.labourContractId } : {};
+    const workers = await LabourContractWorker.find(query).sort({ name: 1 });
+    res.json({ success: true, workers });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get workers' });
+  }
+};
+
+exports.createLabourContractWorker = async (req, res) => {
+  try {
+    const { labourContractId } = req.body;
+    const name = String(req.body.name || '').trim();
+    if (!name || !labourContractId) {
+      return res.status(400).json({ success: false, message: 'Name and labour contract required' });
+    }
+    if (!isValidObjectId(labourContractId)) {
+      return res.status(400).json({ success: false, message: 'Invalid labour contract ID' });
+    }
+    if (!(await LabourContract.exists({ _id: labourContractId }))) {
+      return res.status(404).json({ success: false, message: 'Labour contract not found' });
+    }
+    if (await LabourContractWorker.exists({ labourContractId, name: sameNameRegex(name) })) {
+      return res.status(400).json({ success: false, message: 'A worker with this name already exists for this labour contract' });
+    }
+    const worker = await LabourContractWorker.create({ name, labourContractId });
+    res.status(201).json({ success: true, worker });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to create worker' });
+  }
+};
+
+exports.updateLabourContractWorker = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ success: false, message: 'Name required' });
+    const worker = await LabourContractWorker.findById(req.params.id);
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker not found' });
+    if (await LabourContractWorker.exists({ _id: { $ne: worker._id }, labourContractId: worker.labourContractId, name: sameNameRegex(name) })) {
+      return res.status(400).json({ success: false, message: 'A worker with this name already exists for this labour contract' });
+    }
+    worker.name = name;
+    await worker.save();
+    res.json({ success: true, worker });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update worker' });
+  }
+};
+
+exports.deleteLabourContractWorker = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const worker = await LabourContractWorker.findByIdAndDelete(req.params.id);
     if (!worker) return res.status(404).json({ success: false, message: 'Worker not found' });
     res.json({ success: true, message: 'Deleted' });
   } catch (err) {

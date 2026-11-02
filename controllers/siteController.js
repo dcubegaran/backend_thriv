@@ -5,6 +5,7 @@ const UnexpectedCost = require('../models/UnexpectedCost');
 const SiteContract = require('../models/SiteContract');
 const ExtraExpense = require('../models/ExtraExpense');
 const SiteNote = require('../models/SiteNote');
+const SiteAttendance = require('../models/SiteAttendance');
 const LabourAdvance = require('../models/LabourAdvance');
 const { buildAttendanceRows, labourSpend, weekStartOf } = require('../utils/labourAdvance');
 const Attendance = require('../models/Attendance');
@@ -419,6 +420,7 @@ exports.deleteSite = async (req, res) => {
       SiteContract.deleteMany({ siteId }),
       ExtraExpense.deleteMany({ siteId }),
       SiteNote.deleteMany({ siteId }),
+      SiteAttendance.deleteMany({ siteId }),
       LabourAdvance.deleteMany({ siteId }),
       Credit.deleteMany({ siteId }),
     ]);
@@ -1049,6 +1051,87 @@ exports.updateSiteNote = async (req, res) => {
   }
 };
 
+// Checks an attendance-only entry (labour type, worker, date, not already present that day).
+// Returns { error } or { labourType, worker, entryDate }.
+async function checkAttendanceEntry(site, { date, labourTypeId, workerId }, fallbackDate, excludeId) {
+  if (!labourTypeId || !workerId) return { error: 'Labour type and name required' };
+  if (!isValidObjectId(labourTypeId) || !isValidObjectId(workerId)) return { error: 'Invalid labour type or worker ID' };
+  const entryDate = date ? new Date(date) : fallbackDate;
+  if (Number.isNaN(entryDate.getTime())) return { error: 'Invalid date' };
+  const [labourType, worker] = await Promise.all([LabourType.findById(labourTypeId), Worker.findById(workerId)]);
+  if (!labourType) return { error: 'Labour type not found' };
+  if (!worker) return { error: 'Worker not found' };
+  const sameDay = { siteId: site._id, workerId, date: sameDayRange(entryDate) };
+  const [marked, logged] = await Promise.all([
+    SiteAttendance.exists({ ...sameDay, ...(excludeId && { _id: { $ne: excludeId } }) }),
+    LabourLog.exists(sameDay),
+  ]);
+  if (marked || logged) return { error: 'This worker is already added for this date' };
+  return { labourType, worker, entryDate };
+}
+
+// POST /api/sites/:id/attendance   body: { date, labourTypeId, workerId, remarks }
+exports.addSiteAttendance = async (req, res) => {
+  try {
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const dateError = checkEntryDate(req.user, req.body.date, site);
+    if (dateError) return res.status(400).json({ success: false, message: dateError });
+    const checked = await checkAttendanceEntry(site, req.body, new Date());
+    if (checked.error) return res.status(400).json({ success: false, message: checked.error });
+    const attendance = await SiteAttendance.create({
+      siteId: site._id,
+      date: checked.entryDate,
+      labourTypeId: checked.labourType._id,
+      labourTypeNameSnapshot: checked.labourType.name,
+      workerId: checked.worker._id,
+      workerNameSnapshot: checked.worker.name,
+      remarks: String(req.body.remarks || '').slice(0, 1000),
+      createdBy: req.user._id,
+    });
+    res.status(201).json({ success: true, attendance });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to add attendance' });
+  }
+};
+
+// GET /api/sites/:id/attendance
+exports.getSiteAttendance = async (req, res) => {
+  try {
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const attendance = await SiteAttendance.find({ siteId: site._id }).sort({ date: -1, createdAt: -1 });
+    res.json({ success: true, attendance });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get attendance' });
+  }
+};
+
+// PUT /api/sites/:id/attendance/:entryId - admin / superadmin only (enforced in the route)
+exports.updateSiteAttendance = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.entryId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID' });
+    }
+    const site = await loadAccessibleSite(req, res);
+    if (!site) return;
+    const attendance = await SiteAttendance.findOne({ _id: req.params.entryId, siteId: site._id });
+    if (!attendance) return res.status(404).json({ success: false, message: 'Attendance not found' });
+    const checked = await checkAttendanceEntry(site, req.body, attendance.date, attendance._id);
+    if (checked.error) return res.status(400).json({ success: false, message: checked.error });
+    attendance.date = checked.entryDate;
+    attendance.labourTypeId = checked.labourType._id;
+    attendance.labourTypeNameSnapshot = checked.labourType.name;
+    attendance.workerId = checked.worker._id;
+    attendance.workerNameSnapshot = checked.worker.name;
+    attendance.remarks = String(req.body.remarks || '').slice(0, 1000);
+    await attendance.save();
+    res.json({ success: true, attendance });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to update attendance' });
+  }
+};
+
 // DELETE /api/sites/:id/<entries>/:entryId - admins delete any entry, supervisors only entries dated this week.
 // afterDelete runs extra cleanup (e.g. the attendance row created with a labour log).
 const makeDeleteHandler = (Model, label, afterDelete) => async (req, res) => {
@@ -1076,6 +1159,7 @@ exports.deleteUnexpectedCost = makeDeleteHandler(UnexpectedCost, 'Other cost');
 exports.deleteContract = makeDeleteHandler(SiteContract, 'Contract');
 exports.deleteExtraExpense = makeDeleteHandler(ExtraExpense, 'Extra expense');
 exports.deleteSiteNote = makeDeleteHandler(SiteNote, 'Note');
+exports.deleteSiteAttendance = makeDeleteHandler(SiteAttendance, 'Attendance');
 
 // PUT /api/sites/:id/material/:entryId - admin / superadmin only (enforced in the route)
 exports.updateMaterialLog = async (req, res) => {

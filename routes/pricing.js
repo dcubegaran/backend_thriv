@@ -6,6 +6,8 @@ const {
   getWorkers, createWorker, updateWorker, deleteWorker,
   getSqftPricing, createSqftPricing, updateSqftPricing, deleteSqftPricing,
   getMaterials, createMaterial, updateMaterial, deleteMaterial,
+  getLabourContracts, createLabourContract, updateLabourContract, deleteLabourContract,
+  getLabourContractWorkers, createLabourContractWorker, updateLabourContractWorker, deleteLabourContractWorker,
 } = require('../controllers/pricingController');
 
 // Labour types
@@ -31,5 +33,15 @@ router.get('/materials', protect, getMaterials);
 router.post('/materials', protect, requireRole('superadmin'), createMaterial);
 router.put('/materials/:id', protect, requireRole('superadmin'), updateMaterial);
 router.delete('/materials/:id', protect, requireRole('superadmin'), deleteMaterial);
+
+// Labour contracts and their workers (same access as labour types / workers)
+router.get('/labour-contracts', protect, getLabourContracts);
+router.post('/labour-contracts', protect, requireRole('superadmin'), createLabourContract);
+router.put('/labour-contracts/:id', protect, requireRole('superadmin'), updateLabourContract);
+router.delete('/labour-contracts/:id', protect, requireRole('superadmin'), deleteLabourContract);
+router.get('/labour-contract-workers', protect, getLabourContractWorkers);
+router.post('/labour-contract-workers', protect, requireRole('superadmin', 'admin', 'supervisor'), createLabourContractWorker);
+router.put('/labour-contract-workers/:id', protect, requireRole('superadmin', 'admin', 'supervisor'), updateLabourContractWorker);
+router.delete('/labour-contract-workers/:id', protect, requireRole('superadmin'), deleteLabourContractWorker);
 
 module.exports = router;

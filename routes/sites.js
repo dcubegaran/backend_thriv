@@ -9,8 +9,9 @@ const {
   addContract, getContracts, markContractPaid, updateContract, deleteContract,
   addExtraExpense, getExtraExpenses, updateExtraExpense, deleteExtraExpense,
   addSiteNote, getSiteNotes, updateSiteNote, deleteSiteNote,
-  getLabourAdvances, saveLabourAdvance
-} = require('../controllers/siteController');
+  getLabourAdvances, saveLabourAdvance,
+  addSiteAttendance, getSiteAttendance, updateSiteAttendance, deleteSiteAttendance
+} =require('../controllers/siteController');
 
 // Entries: admins can edit and delete; supervisors can only delete entries dated this week (checked in the controller)
 const canEdit = requireRole('superadmin', 'admin');
@@ -60,5 +61,11 @@ router.post('/:id/notes', addSiteNote);
 router.get('/:id/notes', getSiteNotes);
 router.put('/:id/notes/:entryId', canEdit, updateSiteNote);
 router.delete('/:id/notes/:entryId', canDelete, deleteSiteNote);
+
+// Attendance only (no advance / rate / salary)
+router.post('/:id/attendance', addSiteAttendance);
+router.get('/:id/attendance', getSiteAttendance);
+router.put('/:id/attendance/:entryId', canEdit, updateSiteAttendance);
+router.delete('/:id/attendance/:entryId', canDelete, deleteSiteAttendance);
 
 module.exports = router;
