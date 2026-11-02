@@ -14,6 +14,8 @@ const Worker = require('../models/Worker');
 const Credit = require('../models/Credit');
 const Material = require('../models/Material');
 const ContractType = require('../models/ContractType');
+const LabourContract = require('../models/LabourContract');
+const LabourContractWorker = require('../models/LabourContractWorker');
 const User = require('../models/User');
 const { isValidObjectId, sameNameRegex, sameDayRange } = require('../utils/validate');
 const { generateSiteReportPDF, generateTablePDF } = require('../utils/siteReportPdf');
@@ -741,6 +743,31 @@ exports.getUnexpectedCosts = async (req, res) => {
   }
 };
 
+// Labour Contract Attendance on a contract: body.labourAttendance = { labourContractId, workerIds: [...] }, or null for none.
+// Returns { value } (undefined = not sent, null = none) or { error }.
+async function readLabourAttendance(body) {
+  const input = body.labourAttendance;
+  if (input === undefined) return { value: undefined };
+  if (!input) return { value: null };
+  const { labourContractId } = input;
+  const workerIds = Array.isArray(input.workerIds) ? input.workerIds.map(String) : [];
+  if (!labourContractId || !isValidObjectId(labourContractId)) return { error: 'Select a labour contract' };
+  if (!workerIds.length || workerIds.some(w => !isValidObjectId(w))) return { error: 'Select a name for each worker' };
+  if (new Set(workerIds).size !== workerIds.length) return { error: 'The same worker is selected more than once' };
+  const labourContract = await LabourContract.findById(labourContractId);
+  if (!labourContract) return { error: 'Labour contract not found' };
+  const found = await LabourContractWorker.find({ _id: { $in: workerIds }, labourContractId: labourContract._id });
+  if (found.length !== workerIds.length) return { error: 'Worker not found for this labour contract' };
+  const byId = new Map(found.map(w => [String(w._id), w]));
+  return {
+    value: {
+      labourContractId: labourContract._id,
+      labourContractName: labourContract.name,
+      workers: workerIds.map(id => ({ workerId: byId.get(id)._id, name: byId.get(id).name })),
+    },
+  };
+}
+
 // POST /api/sites/:id/contracts
 exports.addContract = async (req, res) => {
   try {
@@ -774,8 +801,11 @@ exports.addContract = async (req, res) => {
     }
     const dateError = checkEntryDate(req.user, date, site);
     if (dateError) return res.status(400).json({ success: false, message: dateError });
+    const labourAttendance = await readLabourAttendance(req.body);
+    if (labourAttendance.error) return res.status(400).json({ success: false, message: labourAttendance.error });
     const entryDate = date ? new Date(date) : new Date();
     const contract = await SiteContract.create({
+      labourAttendance: labourAttendance.value || undefined,
       siteId: site._id,
       contractTypeId: contractTypeId && isValidObjectId(contractTypeId) ? contractTypeId : undefined,
       contractTypeNameSnapshot: String(nameSnapshot).trim(),
@@ -1273,6 +1303,9 @@ exports.updateContract = async (req, res) => {
     }
     const entryDate = date ? new Date(date) : contract.date;
     if (Number.isNaN(entryDate.getTime())) return res.status(400).json({ success: false, message: 'Invalid date' });
+    const labourAttendance = await readLabourAttendance(req.body);
+    if (labourAttendance.error) return res.status(400).json({ success: false, message: labourAttendance.error });
+    if (labourAttendance.value !== undefined) contract.labourAttendance = labourAttendance.value || undefined;
     contract.contractTypeId = typeId;
     contract.contractTypeNameSnapshot = String(nameSnapshot).trim();
     contract.priceAtTime = hasPrice ? price : undefined;

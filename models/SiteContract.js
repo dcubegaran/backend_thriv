@@ -1,5 +1,16 @@
 const mongoose = require('mongoose');
 
+// Labour Contract Attendance: which workers of a labour contract (Pricing) worked on this contract
+const labourAttendanceSchema = new mongoose.Schema({
+  labourContractId: { type: mongoose.Schema.Types.ObjectId, ref: 'LabourContract', required: true },
+  labourContractName: { type: String, required: true },
+  workers: [{
+    _id: false,
+    workerId: { type: mongoose.Schema.Types.ObjectId, ref: 'LabourContractWorker', required: true },
+    name: { type: String, required: true },
+  }],
+}, { _id: false });
+
 const siteContractSchema = new mongoose.Schema({
   siteId: { type: mongoose.Schema.Types.ObjectId, ref: 'Site', required: true },
   contractTypeId: { type: mongoose.Schema.Types.ObjectId, ref: 'ContractType' },
@@ -8,6 +19,7 @@ const siteContractSchema = new mongoose.Schema({
   advanceAtTime: { type: Number, min: 0 },
   paid: { type: Boolean, default: false },
   remarks: { type: String, default: '' },
+  labourAttendance: { type: labourAttendanceSchema, default: undefined },
   date: { type: Date, default: Date.now },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
