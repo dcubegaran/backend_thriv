@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { protect, requireRole } = require('../middleware/auth');
 const {
-  getSites, getSite, downloadSiteReport, downloadTablePdf, createSite, updateSite, deleteSite, addValuation,
+  getSites, getSite, downloadSiteReport, downloadTablePdf, createSite, updateSite, deleteSite, addValuation, saveSiteNotes,
   addLabour, getLabourLogs, updateLabourPaid, updateLabourLog, deleteLabourLog,
   addMaterial, getMaterialLogs, updateMaterialLog, deleteMaterialLog,
   addUnexpectedCost, getUnexpectedCosts, updateUnexpectedCost, deleteUnexpectedCost,
@@ -24,6 +24,7 @@ router.post('/:id/table-pdf', downloadTablePdf);
 router.put('/:id', updateSite);
 router.delete('/:id', requireRole('superadmin', 'admin'), deleteSite);
 router.post('/:id/valuation', requireRole('superadmin', 'admin'), addValuation);
+router.put('/:id/notes', saveSiteNotes);
 
 router.post('/:id/labour', addLabour);
 router.get('/:id/labour', getLabourLogs);

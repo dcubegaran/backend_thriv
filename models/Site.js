@@ -23,6 +23,11 @@ const siteSchema = new mongoose.Schema({
   status: { type: String, enum: ['active', 'closed'], default: 'active' },
   assignedAdmins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   assignedSupervisors: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  // Plain-text notepad shared by everyone who can open the site
+  notesTitle: { type: String, default: '', maxlength: 200 },
+  notes: { type: String, default: '', maxlength: 20000 },
+  notesUpdatedAt: { type: Date },
+  notesUpdatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
 

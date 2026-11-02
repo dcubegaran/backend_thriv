@@ -437,6 +437,36 @@ exports.addValuation = async (req, res) => {
   }
 };
 
+// PUT /api/sites/:id/notes   body: { title, notes } - saves the site's shared notepad
+exports.saveSiteNotes = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid site ID' });
+    }
+    const title = String(req.body.title ?? '').trim();
+    const notes = String(req.body.notes ?? '');
+    if (title.length > 200) {
+      return res.status(400).json({ success: false, message: 'Title is too long (max 200 characters)' });
+    }
+    if (notes.length > 20000) {
+      return res.status(400).json({ success: false, message: 'Notes are too long (max 20,000 characters)' });
+    }
+    const site = await Site.findById(req.params.id);
+    if (!site) return res.status(404).json({ success: false, message: 'Site not found' });
+    if (!canAccessSite(req.user, site)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    site.notesTitle = title;
+    site.notes = notes;
+    site.notesUpdatedAt = new Date();
+    site.notesUpdatedBy = req.user._id;
+    await site.save();
+    res.json({ success: true, notesTitle: site.notesTitle, notes: site.notes, notesUpdatedAt: site.notesUpdatedAt });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to save notes' });
+  }
+};
+
 // DELETE /api/sites/:id - removes the site and everything recorded against it
 exports.deleteSite = async (req, res) => {
   try {
@@ -741,7 +771,7 @@ exports.addUnexpectedCost = async (req, res) => {
       siteId: site._id, name: sameNameRegex(name), amount: Number(amount), date: sameDayRange(entryDate),
     });
     if (duplicate) {
-      return res.status(400).json({ success: false, message: 'The same additional cost already exists for this date' });
+      return res.status(400).json({ success: false, message: 'The same other cost already exists for this date' });
     }
     const cost = await UnexpectedCost.create({
       siteId: site._id,
@@ -753,7 +783,7 @@ exports.addUnexpectedCost = async (req, res) => {
     });
     res.status(201).json({ success: true, unexpectedCost: cost });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to add additional cost' });
+    res.status(500).json({ success: false, message: 'Failed to add other cost' });
   }
 };
 
@@ -771,7 +801,7 @@ exports.getUnexpectedCosts = async (req, res) => {
     const costs = await UnexpectedCost.find({ siteId: req.params.id }).sort({ date: -1 });
     res.json({ success: true, unexpectedCosts: costs });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to get additional costs' });
+    res.status(500).json({ success: false, message: 'Failed to get other costs' });
   }
 };
 
@@ -976,7 +1006,7 @@ const makeDeleteHandler = (Model, label, afterDelete) => async (req, res) => {
 
 exports.deleteLabourLog = makeDeleteHandler(LabourLog, 'Labour entry', log => Attendance.deleteOne({ labourLogId: log._id }));
 exports.deleteMaterialLog = makeDeleteHandler(MaterialLog, 'Material entry');
-exports.deleteUnexpectedCost = makeDeleteHandler(UnexpectedCost, 'Additional cost');
+exports.deleteUnexpectedCost = makeDeleteHandler(UnexpectedCost, 'Other cost');
 exports.deleteContract = makeDeleteHandler(SiteContract, 'Contract');
 exports.deleteExtraExpense = makeDeleteHandler(ExtraExpense, 'Extra expense');
 
@@ -1037,7 +1067,7 @@ exports.updateUnexpectedCost = async (req, res) => {
     const site = await loadAccessibleSite(req, res);
     if (!site) return;
     const cost = await UnexpectedCost.findOne({ _id: req.params.entryId, siteId: site._id });
-    if (!cost) return res.status(404).json({ success: false, message: 'Additional cost not found' });
+    if (!cost) return res.status(404).json({ success: false, message: 'Other cost not found' });
     const { name, remarks, amount, date } = req.body;
     const fieldError = extraExpenseError(req.body);
     if (fieldError) return res.status(400).json({ success: false, message: fieldError });
@@ -1047,7 +1077,7 @@ exports.updateUnexpectedCost = async (req, res) => {
       _id: { $ne: cost._id }, siteId: site._id, name: sameNameRegex(name), amount: Number(amount), date: sameDayRange(entryDate),
     });
     if (duplicate) {
-      return res.status(400).json({ success: false, message: 'The same additional cost already exists for this date' });
+      return res.status(400).json({ success: false, message: 'The same other cost already exists for this date' });
     }
     cost.name = String(name).trim();
     cost.remarks = remarks || '';
@@ -1056,7 +1086,7 @@ exports.updateUnexpectedCost = async (req, res) => {
     await cost.save();
     res.json({ success: true, unexpectedCost: cost });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to update additional cost' });
+    res.status(500).json({ success: false, message: 'Failed to update other cost' });
   }
 };
 
