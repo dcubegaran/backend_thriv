@@ -5,6 +5,7 @@ const UnexpectedCost = require('../models/UnexpectedCost');
 const SiteContract = require('../models/SiteContract');
 const ExtraExpense = require('../models/ExtraExpense');
 const PersonalExpense = require('../models/PersonalExpense');
+const { generateTablePDF } = require('../utils/siteReportPdf');
 const {
   calcCurrentSpend, calcRemainingAmount, calcRemainingBudget,
   calcSiteProfit, calcActualProfit
@@ -151,3 +152,40 @@ function buildMonthlyBreakdown(labourLogs, materialLogs, unexpectedCosts, start,
 
   return Object.values(months).sort((a, b) => a.month.localeCompare(b.month));
 }
+
+// POST /api/reports/table-pdf - a table the app shows (Contacts, Friends, Personal Expenses) as a PDF,
+// in the same layout as the site tables. heading is the big title at the top of the page.
+exports.downloadTablePdf = async (req, res) => {
+  try {
+    const { heading, title, subtitle, headers, rows, numeric, footer, notes, filename, letterhead } = req.body || {};
+    const cell = v => String(v ?? '').slice(0, 500);
+    if (!Array.isArray(headers) || headers.length === 0 || headers.length > 12 || !Array.isArray(rows) || rows.length > 5000) {
+      return res.status(400).json({ success: false, message: 'Invalid table' });
+    }
+    const width = headers.length;
+    const pdf = await generateTablePDF({
+      siteName: cell(heading),
+      title: cell(title),
+      subtitle: cell(subtitle),
+      headers: headers.map(cell),
+      rows: rows.map(r => Array.from({ length: width }, (_, i) => cell(Array.isArray(r) ? r[i] : ''))),
+      numeric: Array.isArray(numeric) ? numeric.filter(n => Number.isInteger(n)) : [],
+      footer: Array.isArray(footer) ? Array.from({ length: width }, (_, i) => cell(footer[i])) : null,
+      notes: Array.isArray(notes) ? notes.slice(0, 5).map(n => ({
+        text: cell(n && typeof n === 'object' ? n.text : n),
+        bold: Boolean(n?.bold), danger: Boolean(n?.danger), small: Boolean(n?.small),
+      })) : [],
+      letterhead,
+    });
+    const safeName = String(filename || 'table').replace(/[^\w.-]+/g, '_').slice(0, 120);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${safeName}.pdf"`,
+      'Content-Length': pdf.length,
+    });
+    res.send(pdf);
+  } catch (err) {
+    console.error('Table PDF failed:', err);
+    res.status(500).json({ success: false, message: 'Failed to generate PDF' });
+  }
+};

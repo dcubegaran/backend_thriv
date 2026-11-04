@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
-// Labour Contract Attendance: which workers of a labour contract (Pricing) worked on this contract
+// Labour Contract Attendance: which workers of a labour contract (Pricing) worked on this contract.
+// A contract holds one block per labour contract (labourAttendances).
 const labourAttendanceSchema = new mongoose.Schema({
   labourContractId: { type: mongoose.Schema.Types.ObjectId, ref: 'LabourContract', required: true },
   labourContractName: { type: String, required: true },
@@ -20,12 +21,22 @@ const siteContractSchema = new mongoose.Schema({
   advanceAtTime: { type: Number, min: 0 },
   paid: { type: Boolean, default: false },
   remarks: { type: String, default: '' },
+  labourAttendances: { type: [labourAttendanceSchema], default: undefined },
+  // Old single-block field: moved into labourAttendances when the contract is loaded
   labourAttendance: { type: labourAttendanceSchema, default: undefined },
   date: { type: Date, default: Date.now },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
 
 siteContractSchema.index({ siteId: 1 });
+
+// Contracts saved before blocks: show the old single block as labourAttendances (saved on next save)
+siteContractSchema.post('init', function () {
+  if (this.labourAttendance && !this.labourAttendances?.length) {
+    this.labourAttendances = [this.labourAttendance.toObject()];
+    this.labourAttendance = undefined;
+  }
+});
 
 siteContractSchema.pre('validate', function () {
   const hasPrice = this.priceAtTime !== undefined && this.priceAtTime !== null;

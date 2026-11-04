@@ -743,31 +743,37 @@ exports.getUnexpectedCosts = async (req, res) => {
   }
 };
 
-// Labour Contract Attendance on a contract: body.labourAttendance = { labourContractId, workerIds: [...], workerRemarks?: [...] }
-// (remarks line up with workerIds), or null for none.
-// Returns { value } (undefined = not sent, null = none) or { error }.
-async function readLabourAttendance(body) {
-  const input = body.labourAttendance;
+// Labour Contract Attendance on a contract: body.labourAttendances = [{ labourContractId, workerIds: [...], workerRemarks?: [...] }]
+// (one block per labour contract; remarks line up with workerIds), or null / [] for none.
+// The old single body.labourAttendance (older app builds) is read as one block.
+// Returns { value } (undefined = not sent, null = none, else the blocks) or { error }.
+async function readLabourAttendances(body) {
+  let input = body.labourAttendances;
+  if (input === undefined && body.labourAttendance !== undefined) input = body.labourAttendance ? [body.labourAttendance] : null;
   if (input === undefined) return { value: undefined };
-  if (!input) return { value: null };
-  const { labourContractId } = input;
-  const workerIds = Array.isArray(input.workerIds) ? input.workerIds.map(String) : [];
-  const workerRemarks = Array.isArray(input.workerRemarks) ? input.workerRemarks : [];
-  if (!labourContractId || !isValidObjectId(labourContractId)) return { error: 'Select a labour contract' };
-  if (!workerIds.length || workerIds.some(w => !isValidObjectId(w))) return { error: 'Select a name for each worker' };
-  if (new Set(workerIds).size !== workerIds.length) return { error: 'The same worker is selected more than once' };
-  const labourContract = await LabourContract.findById(labourContractId);
-  if (!labourContract) return { error: 'Labour contract not found' };
-  const found = await LabourContractWorker.find({ _id: { $in: workerIds }, labourContractId: labourContract._id });
-  if (found.length !== workerIds.length) return { error: 'Worker not found for this labour contract' };
-  const byId = new Map(found.map(w => [String(w._id), w]));
-  return {
-    value: {
+  if (!Array.isArray(input) || !input.length) return { value: null };
+  const contractIds = input.map(block => String(block?.labourContractId || ''));
+  if (contractIds.some(id => !isValidObjectId(id))) return { error: 'Select a labour contract' };
+  if (new Set(contractIds).size !== contractIds.length) return { error: 'The same labour contract is selected more than once' };
+  const allWorkerIds = input.flatMap(block => (Array.isArray(block.workerIds) ? block.workerIds.map(String) : []));
+  if (new Set(allWorkerIds).size !== allWorkerIds.length) return { error: 'The same worker is selected more than once' };
+  const blocks = [];
+  for (const block of input) {
+    const workerIds = Array.isArray(block.workerIds) ? block.workerIds.map(String) : [];
+    const workerRemarks = Array.isArray(block.workerRemarks) ? block.workerRemarks : [];
+    if (!workerIds.length || workerIds.some(w => !isValidObjectId(w))) return { error: 'Select a name for each worker' };
+    const labourContract = await LabourContract.findById(block.labourContractId);
+    if (!labourContract) return { error: 'Labour contract not found' };
+    const found = await LabourContractWorker.find({ _id: { $in: workerIds }, labourContractId: labourContract._id });
+    if (found.length !== workerIds.length) return { error: 'Worker not found for this labour contract' };
+    const byId = new Map(found.map(w => [String(w._id), w]));
+    blocks.push({
       labourContractId: labourContract._id,
       labourContractName: labourContract.name,
       workers: workerIds.map((id, i) => ({ workerId: byId.get(id)._id, name: byId.get(id).name, remarks: String(workerRemarks[i] || '').trim().slice(0, 1000) })),
-    },
-  };
+    });
+  }
+  return { value: blocks };
 }
 
 // POST /api/sites/:id/contracts
@@ -803,11 +809,11 @@ exports.addContract = async (req, res) => {
     }
     const dateError = checkEntryDate(req.user, date, site);
     if (dateError) return res.status(400).json({ success: false, message: dateError });
-    const labourAttendance = await readLabourAttendance(req.body);
-    if (labourAttendance.error) return res.status(400).json({ success: false, message: labourAttendance.error });
+    const labourAttendances = await readLabourAttendances(req.body);
+    if (labourAttendances.error) return res.status(400).json({ success: false, message: labourAttendances.error });
     const entryDate = date ? new Date(date) : new Date();
     const contract = await SiteContract.create({
-      labourAttendance: labourAttendance.value || undefined,
+      labourAttendances: labourAttendances.value || undefined,
       siteId: site._id,
       contractTypeId: contractTypeId && isValidObjectId(contractTypeId) ? contractTypeId : undefined,
       contractTypeNameSnapshot: String(nameSnapshot).trim(),
@@ -1194,7 +1200,7 @@ exports.deleteSiteNote = makeDeleteHandler(SiteNote, 'Note');
 exports.deleteSiteAttendance = makeDeleteHandler(SiteAttendance, 'Attendance');
 
 // DELETE /api/sites/:id/contracts/:entryId/attendance/:workerId - takes one worker off a contract's
-// Labour Contract Attendance (same delete rules as entries). The last worker removed clears it.
+// Labour Contract Attendance (same delete rules as entries). A block left with no workers is removed.
 exports.deleteContractAttendanceWorker = async (req, res) => {
   try {
     if (!isValidObjectId(req.params.entryId) || !isValidObjectId(req.params.workerId)) {
@@ -1206,11 +1212,12 @@ exports.deleteContractAttendanceWorker = async (req, res) => {
     if (!contract) return res.status(404).json({ success: false, message: 'Contract not found' });
     const dateError = checkDeleteDate(req.user, contract.date);
     if (dateError) return res.status(403).json({ success: false, message: dateError });
-    const workers = contract.labourAttendance?.workers || [];
-    const remaining = workers.filter(w => String(w.workerId) !== req.params.workerId);
-    if (remaining.length === workers.length) return res.status(404).json({ success: false, message: 'Attendance not found' });
-    if (remaining.length) contract.labourAttendance.workers = remaining;
-    else contract.labourAttendance = undefined;
+    const blocks = contract.labourAttendances || [];
+    const block = blocks.find(b => b.workers.some(w => String(w.workerId) === req.params.workerId));
+    if (!block) return res.status(404).json({ success: false, message: 'Attendance not found' });
+    block.workers = block.workers.filter(w => String(w.workerId) !== req.params.workerId);
+    const remaining = blocks.filter(b => b.workers.length);
+    contract.labourAttendances = remaining.length ? remaining : undefined;
     await contract.save();
     res.json({ success: true, message: 'Attendance deleted' });
   } catch (err) {
@@ -1330,9 +1337,9 @@ exports.updateContract = async (req, res) => {
     }
     const entryDate = date ? new Date(date) : contract.date;
     if (Number.isNaN(entryDate.getTime())) return res.status(400).json({ success: false, message: 'Invalid date' });
-    const labourAttendance = await readLabourAttendance(req.body);
-    if (labourAttendance.error) return res.status(400).json({ success: false, message: labourAttendance.error });
-    if (labourAttendance.value !== undefined) contract.labourAttendance = labourAttendance.value || undefined;
+    const labourAttendances = await readLabourAttendances(req.body);
+    if (labourAttendances.error) return res.status(400).json({ success: false, message: labourAttendances.error });
+    if (labourAttendances.value !== undefined) contract.labourAttendances = labourAttendances.value || undefined;
     contract.contractTypeId = typeId;
     contract.contractTypeNameSnapshot = String(nameSnapshot).trim();
     contract.priceAtTime = hasPrice ? price : undefined;

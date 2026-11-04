@@ -45,6 +45,7 @@ app.use('/api/reports', require('./routes/reports'));
 app.use('/api/upload', require('./routes/upload'));
 app.use('/api/letterpads', require('./routes/letterpads'));
 app.use('/api/friends', require('./routes/friends'));
+app.use('/api/contacts', require('./routes/contacts'));
 app.use('/api/agreements', require('./routes/agreements'));
 
 // Health check
