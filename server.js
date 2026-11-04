@@ -91,10 +91,14 @@ async function ensureInitialSuperadmin() {
   console.log(`Initial superadmin created: ${email}`);
 }
 
+const { removeOldFriendAmountsOnce } = require('./utils/oldFriendAmounts');
+
 mongoose.connect(process.env.MONGO_URI)
   .then(async () => {
     console.log('MongoDB connected');
     await ensureInitialSuperadmin();
+    // One-time: take friends' old amounts back out of Spent (a failure here must not stop the server)
+    await removeOldFriendAmountsOnce().catch(err => console.error('Old friend amounts cleanup failed:', err));
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   })
   .catch(err => {
