@@ -2,21 +2,10 @@ const Friend = require('../models/Friend');
 const FriendEntry = require('../models/FriendEntry');
 const { sameNameRegex, isValidObjectId } = require('../utils/validate');
 
-// Friends saved before Spent / Received entries: their amount becomes their first Spent entry.
-// Each friend is claimed atomically (amount unset in the same step), so it moves only once.
-async function moveOldAmounts() {
-  for (;;) {
-    const old = await Friend.findOneAndUpdate(
-      { amount: { $exists: true } },
-      { $unset: { amount: 1, reason: 1, date: 1 } },
-      { new: false },
-    ).lean();
-    if (!old) return;
-    await FriendEntry.create({
-      friendId: old._id, type: 'spent', amount: Number(old.amount) || 0,
-      reason: old.reason || '', date: old.date || old.createdAt, createdBy: old.createdBy,
-    });
-  }
+// Friends saved before Spent / Received entries: their old single amount is dropped (not counted as Spent),
+// so Spent and Received only hold entries added inside the friend
+async function dropOldAmounts() {
+  await Friend.updateMany({ amount: { $exists: true } }, { $unset: { amount: 1, reason: 1, date: 1 } });
 }
 
 // { friendId: { spent, received } }
@@ -42,7 +31,7 @@ const withTotals = (friend, totals) => {
 // GET /api/friends - friends with their Spent / Received totals
 exports.getFriends = async (req, res) => {
   try {
-    await moveOldAmounts();
+    await dropOldAmounts();
     const [friends, totals] = await Promise.all([Friend.find({}).sort({ name: 1 }), totalsByFriend()]);
     res.json({ success: true, friends: friends.map(f => withTotals(f, totals)) });
   } catch (err) {
@@ -54,7 +43,7 @@ exports.getFriends = async (req, res) => {
 exports.getFriend = async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid ID' });
-    await moveOldAmounts();
+    await dropOldAmounts();
     const friend = await Friend.findById(req.params.id);
     if (!friend) return res.status(404).json({ success: false, message: 'Friend not found' });
     const [entries, totals] = await Promise.all([
