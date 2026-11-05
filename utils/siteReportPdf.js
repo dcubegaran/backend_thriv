@@ -1,7 +1,8 @@
 const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
-const { LETTERHEAD_MARGINS, LETTERHEAD_FOOTER_Y, loadLetterhead, useLetterhead } = require('./letterhead');
+// With a letter pad, the blank-page layout is shrunk to fit inside the letter pad (same pages either way)
+const { loadLetterhead, useLetterheadScaled } = require('./letterhead');
 
 const COLORS = {
   dark: '#1a1a1a',
@@ -56,7 +57,7 @@ function formatDays(days) {
  */
 async function generateSiteReportPDF(data) {
   const letterheadFile = await loadLetterhead(data.letterhead);
-  const margins = letterheadFile ? { ...LETTERHEAD_MARGINS } : { top: 50, bottom: 45, left: PAGE_MARGIN, right: PAGE_MARGIN };
+  const margins = { top: 50, bottom: 45, left: PAGE_MARGIN, right: PAGE_MARGIN };
   const TOP = margins.top;
   const BOTTOM_LIMIT = margins.bottom;
   return new Promise((resolve, reject) => {
@@ -75,7 +76,7 @@ async function generateSiteReportPDF(data) {
     doc.on('data', chunk => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
-    useLetterhead(doc, letterheadFile);
+    useLetterheadScaled(doc, letterheadFile);
 
     const pageWidth = doc.page.width;
     const contentWidth = pageWidth - PAGE_MARGIN * 2;
@@ -148,203 +149,121 @@ async function generateSiteReportPDF(data) {
       y += height;
     };
 
-    // ================= PAGE 1: site details + summary =================
-    text('SITE REPORT', left, TOP, { size: 14, bold: true, color: COLORS.accent, width: contentWidth, align: 'center' });
-    y = TOP + 28;
-    text(`Report Period: ${formatDate(range.start)} to ${formatDate(range.end)}`, left, y, { size: 10, bold: true, width: contentWidth * 0.65, lineBreak: false });
-    text(`Generated: ${formatDate(generatedAt)}`, left, y, { size: 9, color: COLORS.muted, width: contentWidth, align: 'right', lineBreak: false });
-    y += 30;
+    // Same layout as the Print button on the site page: header, Weekly Attendance,
+    // Attendance by date, then the open credits.
+    const period = `${formatDate(range.start)} - ${formatDate(range.end)}`;
 
-    // --- Site details ---
-    section('Site Details');
-    const kvRows = [
-      ['Site Name', site.siteName],
-      ['Location', site.location],
-      ['Owner', site.ownerName],
-      ['Owner Phone', site.ownerPhone],
+    // ================= Header =================
+    text(site.siteName, left, TOP, { size: 18, bold: true, color: COLORS.accent, width: contentWidth });
+    y = TOP + measure(site.siteName, contentWidth, 18, true) + 4;
+    const metaLines = [
+      `Site Report  ·  ${period}`,
+      `${site.location || ''}  ·  Owner: ${site.ownerName || ''} (${site.ownerPhone || ''})`,
+      `${company}  ·  Generated on: ${formatDate(generatedAt)}`,
     ];
-    if (site.sqft) kvRows.push(['Area', `${Number(site.sqft).toLocaleString('en-IN')} sqft`]);
-    kvRows.push(['Status', site.status === 'active' ? 'Active' : 'Closed']);
-    if (site.startDate) kvRows.push(['Start Date', formatDate(site.startDate)]);
-    if (site.status === 'closed' && site.endDate) kvRows.push(['End Date', formatDate(site.endDate)]);
-
-    const labelWidth = 120;
-    const valueX = left + labelWidth + 10;
-    const valueWidth = contentWidth - labelWidth - 10;
-    kvRows.forEach(([label, value]) => {
-      const rowHeight = Math.max(14, measure(value, valueWidth, 10, true)) + 6;
-      text(label, left, y, { size: 10, color: COLORS.muted, width: labelWidth, lineBreak: false });
-      text(value || '-', valueX, y, { size: 10, bold: true, width: valueWidth });
-      y += rowHeight;
+    metaLines.forEach((line, i) => {
+      text(line, left, y, { size: 10, bold: i === 0, color: i === 0 ? COLORS.dark : COLORS.muted, width: contentWidth });
+      y += measure(line, contentWidth, 10, i === 0) + 3;
     });
-    y += 12;
+    y += 4;
+    hr(y, COLORS.accent, 2);
+    y += 16;
 
-    // --- Worker-wise attendance (same columns as the Weekly Attendance table on the site page) ---
-    section(`Attendance Summary  (${formatDate(range.start)} to ${formatDate(range.end)})`);
-
-    if (workers.length === 0) {
-      emptyNote('No labour entries in this range.');
-    } else {
-      const cols = [
-        { label: 'WORKER', x: left, width: 105 },
-        { label: 'LABOUR TYPE', x: left + 105, width: 95 },
-        { label: 'NO OF DAYS', x: left + 200, width: 55, align: 'center' },
-        { label: 'ADVANCE PAID', x: left + 255, width: 75, align: 'right' },
-        { label: 'TOTAL SALARY', x: left + 330, width: 85, align: 'right' },
-        { label: 'REMAINING TO PAY', x: left + 415, width: contentWidth - 415, align: 'right' },
-      ];
-      const amountOpts = (col, extra = {}) => ({ size: 9.5, width: col.width - 8, align: 'right', lineBreak: false, ...extra });
+    // Writes a table: header, rows (new page + header again when full), optional bold total row
+    const drawTable = (cols, rows, { emptyText, total } = {}) => {
       tableHeader(cols, true);
-
-      workers.forEach(row => {
-        const rowHeight = Math.max(
-          14,
-          measure(row.workerName, cols[0].width - 8, 10),
-          measure(row.labourType, cols[1].width - 8, 10),
-        ) + 12;
+      if (rows.length === 0) {
+        text(emptyText || 'No entries', left, y + 8, { size: 10, color: COLORS.muted, width: contentWidth, align: 'center' });
+        y += 30;
+        return;
+      }
+      rows.forEach(row => {
+        const rowHeight = Math.max(14, ...row.cells.map((c, i) => measure(c, cols[i].width - 8, 10, Boolean(row.bold?.[i])))) + 12;
         if (y + rowHeight > doc.page.height - BOTTOM_LIMIT) {
           newPage();
           tableHeader(cols, true);
         }
-        text(row.workerName, cols[0].x + 4, y + 6, { size: 10, width: cols[0].width - 8 });
-        text(row.labourType, cols[1].x + 4, y + 6, { size: 10, width: cols[1].width - 8 });
-        text(formatDays(row.days), cols[2].x + 4, y + 6, { size: 10, width: cols[2].width - 8, align: 'center', lineBreak: false });
-        text(formatAmount(row.advancePaid), cols[3].x + 4, y + 6, amountOpts(cols[3]));
-        text(formatAmount(row.totalSalary), cols[4].x + 4, y + 6, amountOpts(cols[4], { bold: true }));
-        text(formatAmount(row.remaining), cols[5].x + 4, y + 6, amountOpts(cols[5], { bold: true, color: remainingColor(row) }));
-        y += rowHeight;
-        hr(y, '#e5e5e5', 0.5);
-      });
-
-      // Totals row
-      ensureSpace(30);
-      y += 6;
-      const sum = key => workers.reduce((total, row) => total + Number(row[key] || 0), 0);
-      text('Total', cols[0].x + 4, y, { size: 10, bold: true, width: cols[0].width - 8, lineBreak: false });
-      text(formatDays(sum('days')), cols[2].x + 4, y, { size: 10, bold: true, color: COLORS.accent, width: cols[2].width - 8, align: 'center', lineBreak: false });
-      text(formatAmount(sum('advancePaid')), cols[3].x + 4, y, amountOpts(cols[3], { bold: true, color: COLORS.accent }));
-      text(formatAmount(sum('totalSalary')), cols[4].x + 4, y, amountOpts(cols[4], { bold: true, color: COLORS.accent }));
-      text(formatAmount(sum('remaining')), cols[5].x + 4, y, amountOpts(cols[5], { bold: true, color: COLORS.accent }));
-      y += 22;
-
-      const overAdvanced = workers.filter(row => row.remaining < 0);
-      if (overAdvanced.length) {
-        const warning = `Alert: advance is more than salary for ${overAdvanced.map(row => `${row.workerName} (${formatAmount(row.remaining)})`).join(', ')}`;
-        const height = measure(warning, contentWidth - 8, 10, true) + 6;
-        ensureSpace(height + 4);
-        text(warning, left + 4, y, { size: 10, bold: true, color: COLORS.danger, width: contentWidth - 8 });
-        y += height;
-      }
-    }
-    y += 12;
-
-    // --- Selected period summary ---
-    section('Selected Period Summary');
-    const totalDays = attendance.reduce((sum, day) => sum + day.entries.reduce((s, e) => s + e.days, 0), 0);
-    const openCredits = credits.filter(c => c.status === 'open').reduce((sum, c) => sum + Number(c.amount || 0), 0);
-    [
-      ['Labour Days Present', formatDays(totalDays)],
-      ['Attendance Salary', formatAmount(workers.reduce((sum, w) => sum + Number(w.totalSalary || 0), 0))],
-      ['Open Credits', formatAmount(openCredits)],
-    ].forEach(([label, value]) => {
-      text(label, left + 4, y, { size: 11, width: contentWidth * 0.5, lineBreak: false });
-      text(value, left, y, { size: 11, bold: true, width: contentWidth - 4, align: 'right', lineBreak: false });
-      y += 20;
-      hr(y - 4, '#e5e5e5', 0.5);
-    });
-
-    // ================= PAGE 2+: attendance by date =================
-    newPage();
-    section(`Attendance by Date  (${formatDate(range.start)} to ${formatDate(range.end)})`);
-
-    if (attendance.length === 0) {
-      emptyNote('No attendance recorded in this period.');
-    } else {
-      // Count sits right beside the labour type so the two are easy to read together
-      const typeWidth = 300;
-      const cols = [
-        { label: 'DATE / LABOUR TYPE', x: left, width: typeWidth },
-        { label: 'PRESENT', x: left + typeWidth, width: 100, align: 'center' },
-      ];
-      const dateRowHeight = 24;
-      const pageLimit = () => doc.page.height - BOTTOM_LIMIT;
-      const freshPageRoom = pageLimit() - TOP - 22;
-      const breakWithHeader = () => {
-        newPage();
-        tableHeader(cols);
-      };
-      tableHeader(cols);
-
-      attendance.forEach(day => {
-        const rows = day.entries.map(entry => ({
-          ...entry,
-          height: Math.max(14, measure(entry.labourType, cols[0].width - 30, 10)) + 8,
+        row.cells.forEach((c, i) => text(c, cols[i].x + 4, y + 6, {
+          size: 10, bold: Boolean(row.bold?.[i]), color: row.color?.[i] || COLORS.dark, width: cols[i].width - 8, align: cols[i].align || 'left',
         }));
-        const blockHeight = dateRowHeight + rows.reduce((sum, r) => sum + r.height, 0);
-
-        // Keep a date together with its labour types when it fits on one page
-        if (y + blockHeight > pageLimit() && blockHeight <= freshPageRoom) breakWithHeader();
-        else if (y + dateRowHeight + rows[0].height > pageLimit()) breakWithHeader();
-
-        doc.rect(left, y, contentWidth, dateRowHeight).fill('#f3f6fa');
-        text(formatDate(day.date), cols[0].x + 4, y + 7, { size: 10.5, bold: true, color: COLORS.accent, width: cols[0].width - 8, lineBreak: false });
-        y += dateRowHeight;
-
-        rows.forEach(row => {
-          if (y + row.height > pageLimit()) breakWithHeader();
-          text(row.labourType, cols[0].x + 22, y + 5, { size: 10, width: cols[0].width - 30 });
-          text(formatDays(row.days), cols[1].x, y + 5, { size: 10, bold: true, width: cols[1].width, align: 'center', lineBreak: false });
-          y += row.height;
-          hr(y, '#e5e5e5', 0.5);
-        });
-      });
-      y += 10;
-    }
-
-    // ================= Credits (last) =================
-    y += 10;
-    ensureSpace(90);
-    section('Open Credits');
-
-    if (credits.length === 0) {
-      emptyNote('No open credits.');
-    } else {
-      const cols = [
-        { label: 'DATE', x: left, width: 100 },
-        { label: 'SHOP / VENDOR', x: left + 100, width: 205 },
-        { label: 'AMOUNT', x: left + 305, width: 110, align: 'right' },
-        { label: 'STATUS', x: left + 415, width: contentWidth - 415, align: 'center' },
-      ];
-      tableHeader(cols);
-
-      credits.forEach(credit => {
-        const rowHeight = Math.max(14, measure(credit.shopName, cols[1].width - 8, 10)) + 12;
-        if (y + rowHeight > doc.page.height - BOTTOM_LIMIT) {
-          newPage();
-          tableHeader(cols);
-        }
-        const isOpen = credit.status === 'open';
-        text(formatDate(credit.date), cols[0].x + 4, y + 6, { size: 10, width: cols[0].width - 8, lineBreak: false });
-        text(credit.shopName, cols[1].x + 4, y + 6, { size: 10, width: cols[1].width - 8 });
-        text(formatAmount(credit.amount), cols[2].x + 4, y + 6, { size: 10, bold: true, width: cols[2].width - 8, align: 'right', lineBreak: false });
-        text(isOpen ? 'Open' : 'Closed', cols[3].x + 4, y + 6, { size: 10, bold: true, color: isOpen ? COLORS.danger : COLORS.ok, width: cols[3].width - 8, align: 'center', lineBreak: false });
         y += rowHeight;
         hr(y, '#e5e5e5', 0.5);
       });
+      if (total) {
+        ensureSpace(28);
+        doc.rect(left, y, contentWidth, 24).fill(COLORS.band);
+        total.forEach((c, i) => text(c, cols[i].x + 4, y + 7, {
+          size: 10, bold: true, color: COLORS.accent, width: cols[i].width - 8, align: cols[i].align || 'left', lineBreak: false,
+        }));
+        y += 24;
+      }
+    };
 
-      ensureSpace(30);
-      y += 10;
-      text('Total Open Credits', left + 4, y, { size: 10, bold: true, color: COLORS.danger, width: 200, lineBreak: false });
-      text(formatAmount(openCredits), left, y, { size: 10, bold: true, color: COLORS.danger, width: contentWidth - 4, align: 'right', lineBreak: false });
-      y += 18;
+    // ================= Weekly Attendance =================
+    section('Weekly Attendance');
+    const workerRows = [...workers].sort((a, b) => String(a.workerName).localeCompare(String(b.workerName)));
+    const sum = key => workerRows.reduce((total, row) => total + Number(row[key] || 0), 0);
+    drawTable([
+      { label: 'WORKER', x: left, width: 105 },
+      { label: 'LABOUR TYPE', x: left + 105, width: 95 },
+      { label: 'NO OF DAYS', x: left + 200, width: 55, align: 'right' },
+      { label: 'ADVANCE PAID', x: left + 255, width: 75, align: 'right' },
+      { label: 'TOTAL SALARY', x: left + 330, width: 85, align: 'right' },
+      { label: 'REMAINING TO PAY', x: left + 415, width: contentWidth - 415, align: 'right' },
+    ], workerRows.map(row => ({
+      cells: [row.workerName, row.labourType, formatDays(row.days), formatAmount(row.advancePaid), formatAmount(row.totalSalary), formatAmount(row.remaining)],
+      bold: [false, false, false, false, true, true],
+      color: [null, null, null, null, null, remainingColor(row)],
+    })), {
+      emptyText: 'No labour entries in this range.',
+      total: workerRows.length
+        ? ['Total', '', formatDays(sum('days')), formatAmount(sum('advancePaid')), formatAmount(sum('totalSalary')), formatAmount(sum('remaining'))]
+        : null,
+    });
+    const overAdvanced = workerRows.filter(row => row.remaining < 0);
+    if (overAdvanced.length) {
+      y += 6;
+      const warning = `Alert: advance is more than salary for ${overAdvanced.map(row => `${row.workerName} (${formatAmount(row.remaining)})`).join(', ')}`;
+      const height = measure(warning, contentWidth - 8, 10, true) + 6;
+      ensureSpace(height + 4);
+      text(warning, left + 4, y, { size: 10, bold: true, color: COLORS.danger, width: contentWidth - 8, align: 'right' });
+      y += height;
     }
+    y += 18;
+
+    // ================= Attendance by date =================
+    // Date on the first row of each day, then how many of each labour type were present
+    section('Attendance by date');
+    drawTable([
+      { label: 'DATE', x: left, width: 130 },
+      { label: 'LABOUR TYPE', x: left + 130, width: contentWidth - 230 },
+      { label: 'NO OF DAYS', x: left + contentWidth - 100, width: 100, align: 'right' },
+    ], attendance.flatMap(day => day.entries.map((entry, i) => ({
+      cells: [i === 0 ? formatDate(day.date) : '', entry.labourType, formatDays(entry.days)],
+    }))), { emptyText: 'No labour entries in this range.' });
+    y += 18;
+
+    // ================= Credits · Open =================
+    section('Credits · Open');
+    const openCredits = credits.filter(c => c.status === 'open');
+    drawTable([
+      { label: 'DATE', x: left, width: 100 },
+      { label: 'SHOP / VENDOR', x: left + 100, width: 160 },
+      { label: 'AMOUNT', x: left + 260, width: 100, align: 'right' },
+      { label: 'REMARKS', x: left + 360, width: contentWidth - 360 },
+    ], openCredits.map(c => ({
+      cells: [formatDate(c.date), c.shopName, formatAmount(c.amount), c.remarks || ''],
+    })), {
+      emptyText: 'No open credits on this site.',
+      total: openCredits.length ? ['Total', '', formatAmount(openCredits.reduce((s, c) => s + Number(c.amount || 0), 0)), ''] : null,
+    });
 
     // ================= Footer on every page =================
     const pages = doc.bufferedPageRange();
     for (let i = pages.start; i < pages.start + pages.count; i++) {
       doc.switchToPage(i);
       doc.page.margins = { ...doc.page.margins, bottom: 0 }; // allow drawing inside the bottom margin without spawning a page
-      const footerY = letterheadFile ? LETTERHEAD_FOOTER_Y : doc.page.height - 24;
+      const footerY = doc.page.height - 24;
       text(`${site.siteName}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth * 0.7, lineBreak: false });
       text(`Page ${i + 1} of ${pages.count}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth, align: 'right', lineBreak: false });
     }
@@ -365,9 +284,7 @@ async function generateSiteReportPDF(data) {
  */
 async function generateTablePDF(data) {
   const letterheadFile = await loadLetterhead(data.letterhead);
-  const margins = letterheadFile
-    ? { top: LETTERHEAD_MARGINS.top, bottom: LETTERHEAD_MARGINS.bottom, left: PAGE_MARGIN - 14, right: PAGE_MARGIN - 14 }
-    : { top: 50, bottom: 45, left: PAGE_MARGIN - 14, right: PAGE_MARGIN - 14 };
+  const margins = { top: 50, bottom: 45, left: PAGE_MARGIN - 14, right: PAGE_MARGIN - 14 };
   const TOP = margins.top;
   const BOTTOM_LIMIT = margins.bottom;
   return new Promise((resolve, reject) => {
@@ -394,7 +311,7 @@ async function generateTablePDF(data) {
     doc.on('data', chunk => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
-    useLetterhead(doc, letterheadFile);
+    useLetterheadScaled(doc, letterheadFile);
 
     const left = margin;
     const contentWidth = doc.page.width - margin * 2;
@@ -583,7 +500,7 @@ async function generateTablePDF(data) {
     for (let i = pages.start; i < pages.start + pages.count; i++) {
       doc.switchToPage(i);
       doc.page.margins = { ...doc.page.margins, bottom: 0 };
-      const footerY = letterheadFile ? LETTERHEAD_FOOTER_Y : doc.page.height - 24;
+      const footerY = doc.page.height - 24;
       text(`${siteName}  |  ${title}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth * 0.75, lineBreak: false });
       text(`Page ${i + 1} of ${pages.count}`, left, footerY, { size: 8, color: COLORS.muted, width: contentWidth, align: 'right', lineBreak: false });
     }

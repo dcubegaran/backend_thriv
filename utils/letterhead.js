@@ -51,4 +51,29 @@ function useLetterhead(doc, file) {
   doc.on('pageAdded', () => drawLetterhead(doc, file));
 }
 
-module.exports = { HAS_LETTERHEAD, LETTERHEAD_MARGINS, LETTERHEAD_FOOTER_Y, letterheadMargins, loadLetterhead, useLetterhead };
+// Part of a blank A4 page the reports use (from the top margin down to the page numbers), and the
+// part of a letter pad page that is clear of its header and the wave at the bottom.
+const BLANK_BAND = { top: 40, bottom: 832 };
+const PAD_BAND = { top: 118, bottom: 712 };
+
+// For reports laid out with the blank page's margins: draws the letter pad behind every page and
+// shrinks the whole blank-page layout to fit inside the letter pad, so a report has the same pages
+// (same page breaks, same content on each page) with or without a letter pad - just smaller.
+// The scale is applied once at the start of each page and stays for that page, so the page
+// numbers added later (switchToPage) are scaled the same way.
+function useLetterheadScaled(doc, file) {
+  if (!file) return;
+  const scale = (PAD_BAND.bottom - PAD_BAND.top) / (BLANK_BAND.bottom - BLANK_BAND.top);
+  const apply = () => {
+    drawLetterhead(doc, file);
+    const dx = (doc.page.width * (1 - scale)) / 2; // centred left to right
+    const dy = PAD_BAND.top - BLANK_BAND.top * scale;
+    doc.transform(scale, 0, 0, scale, dx, dy);
+  };
+  apply();
+  doc.on('pageAdded', apply);
+}
+
+module.exports = {
+  HAS_LETTERHEAD, LETTERHEAD_MARGINS, LETTERHEAD_FOOTER_Y, letterheadMargins, loadLetterhead, useLetterhead, useLetterheadScaled,
+};

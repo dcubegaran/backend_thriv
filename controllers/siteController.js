@@ -228,7 +228,7 @@ exports.downloadSiteReport = async (req, res) => {
       workers,
       attendance,
       letterhead,
-      credits: credits.map(c => ({ date: c.date, shopName: c.shopName, amount: c.amount, status: c.status })),
+      credits: credits.map(c => ({ date: c.date, shopName: c.shopName, amount: c.amount, status: c.status, remarks: c.remarks || '' })),
     });
 
     res.set({
