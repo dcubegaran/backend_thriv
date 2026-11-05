@@ -255,7 +255,7 @@ exports.downloadTablePdf = async (req, res) => {
     if (!canAccessSite(req.user, site)) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
-    const { title, subtitle, meta, headers, rows, numeric, footer, notes, filename, letterhead } = req.body || {};
+    const { title, subtitle, meta, headers, rows, numeric, footer, notes, filename, letterhead, siteFirst, summary } = req.body || {};
     const cell = v => String(v ?? '').slice(0, 500);
     if (!Array.isArray(headers) || headers.length === 0 || headers.length > 12 || !Array.isArray(rows) || rows.length > 5000) {
       return res.status(400).json({ success: false, message: 'Invalid table' });
@@ -267,7 +267,10 @@ exports.downloadTablePdf = async (req, res) => {
       subtitle: cell(subtitle),
       meta: Array.isArray(meta) ? meta.slice(0, 5).map(cell) : [],
       headers: headers.map(cell),
-      rows: rows.map(r => Array.from({ length: width }, (_, i) => cell(Array.isArray(r) ? r[i] : ''))),
+      // A row is its cells, or { group: 'text' } for a shaded heading row (e.g. a date)
+      rows: rows.map(r => (r && !Array.isArray(r) && typeof r === 'object' && r.group != null
+        ? { group: cell(r.group) }
+        : Array.from({ length: width }, (_, i) => cell(Array.isArray(r) ? r[i] : '')))),
       numeric: Array.isArray(numeric) ? numeric.filter(n => Number.isInteger(n)) : [],
       footer: Array.isArray(footer) ? Array.from({ length: width }, (_, i) => cell(footer[i])) : null,
       notes: Array.isArray(notes) ? notes.slice(0, 5).map(n => ({
@@ -275,6 +278,13 @@ exports.downloadTablePdf = async (req, res) => {
         bold: Boolean(n?.bold), danger: Boolean(n?.danger), small: Boolean(n?.small),
       })) : [],
       letterhead,
+      siteFirst: Boolean(siteFirst),
+      summary: summary && typeof summary === 'object' && Array.isArray(summary.lines) ? {
+        title: cell(summary.title),
+        lines: summary.lines.slice(0, 10).map(l => ({
+          label: cell(l?.label), value: cell(l?.value), bold: Boolean(l?.bold), danger: Boolean(l?.danger),
+        })),
+      } : null,
     });
     const safeName = String(filename || 'entries').replace(/[^\w.-]+/g, '_').slice(0, 120);
     res.set({

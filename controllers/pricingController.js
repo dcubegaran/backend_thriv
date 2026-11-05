@@ -143,7 +143,9 @@ exports.deleteWorker = async (req, res) => {
   }
 };
 
-// ---- Labour Contracts (same as labour types, without a rate) ----
+// ---- Labour Contracts (same as labour types) ----
+
+const readRate = (v) => (v === undefined || v === null || v === '' || isNaN(v) || Number(v) < 0 ? null : Number(v));
 
 exports.getLabourContracts = async (req, res) => {
   try {
@@ -157,11 +159,12 @@ exports.getLabourContracts = async (req, res) => {
 exports.createLabourContract = async (req, res) => {
   try {
     const name = String(req.body.name || '').trim();
-    if (!name) return res.status(400).json({ success: false, message: 'Name required' });
+    const ratePerDay = readRate(req.body.ratePerDay);
+    if (!name || ratePerDay === null) return res.status(400).json({ success: false, message: 'Name and a non-negative rate required' });
     if (await LabourContract.exists({ name: sameNameRegex(name) })) {
       return res.status(400).json({ success: false, message: 'A labour contract with this name already exists' });
     }
-    const labourContract = await LabourContract.create({ name });
+    const labourContract = await LabourContract.create({ name, ratePerDay });
     res.status(201).json({ success: true, labourContract });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to create labour contract' });
@@ -174,11 +177,12 @@ exports.updateLabourContract = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid ID' });
     }
     const name = String(req.body.name || '').trim();
-    if (!name) return res.status(400).json({ success: false, message: 'Name required' });
+    const ratePerDay = readRate(req.body.ratePerDay);
+    if (!name || ratePerDay === null) return res.status(400).json({ success: false, message: 'Name and a non-negative rate required' });
     if (await LabourContract.exists({ _id: { $ne: req.params.id }, name: sameNameRegex(name) })) {
       return res.status(400).json({ success: false, message: 'A labour contract with this name already exists' });
     }
-    const labourContract = await LabourContract.findByIdAndUpdate(req.params.id, { name }, { new: true });
+    const labourContract = await LabourContract.findByIdAndUpdate(req.params.id, { name, ratePerDay }, { new: true });
     if (!labourContract) return res.status(404).json({ success: false, message: 'Not found' });
     res.json({ success: true, labourContract });
   } catch (err) {

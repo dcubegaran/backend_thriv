@@ -358,7 +358,10 @@ async function generateSiteReportPDF(data) {
  * The page sends the rows exactly as shown on screen, already formatted.
  * data: { company, siteName, title, subtitle, meta: [string], headers: [string], rows: [[string]],
  *         numeric: [columnIndex], footer: [string] | null,
- *         notes: [string | { text, bold, danger, small }] (lines under the table) }
+ *         notes: [string | { text, bold, danger, small }] (lines under the table),
+ *         siteFirst: site name as the big heading with the title under it (like the site report),
+ *         summary: { title, lines: [{ label, value, bold, danger }] } (a summary block under the table) }
+ * A row can also be { group: 'text' }: a shaded heading row (e.g. a date), with the rows under it indented.
  */
 async function generateTablePDF(data) {
   const letterheadFile = await loadLetterhead(data.letterhead);
@@ -370,8 +373,12 @@ async function generateTablePDF(data) {
   return new Promise((resolve, reject) => {
     const {
       company = 'Balu Hari Builders', siteName = '', title = '', subtitle = '', meta = [],
-      headers = [], rows = [], numeric = [], footer = null, letterhead,
+      headers = [], rows = [], numeric = [], footer = null, letterhead, siteFirst = false, summary = null,
     } = data;
+    const isGroup = row => !Array.isArray(row);
+    const dataRows = rows.filter(row => !isGroup(row));
+    const hasGroups = dataRows.length !== rows.length;
+    const INDENT = hasGroups ? 14 : 0;
     const notes = Array.isArray(data.notes) ? data.notes.filter(n => n && (typeof n === 'string' || n.text)) : [];
 
     // Portrait, to match the letter pad behind every page
@@ -438,12 +445,12 @@ async function generateTablePDF(data) {
     const headerMin = headers.map((h, i) => {
       const headerWidth = measureWidth(h.toUpperCase(), 8.5, true);
       if (!numeric.includes(i)) return headerWidth + PAD + 2;
-      const cells = [...rows.map(r => r[i]), ...(footer ? [footer[i]] : [])];
+      const cells = [...dataRows.map(r => r[i]), ...(footer ? [footer[i]] : [])];
       return Math.max(headerWidth, ...cells.map(c => measureWidth(c, FONT, true))) + PAD + 2;
     });
     const natural = headers.map((h, i) => {
-      const cells = [...rows.map(r => r[i]), ...(footer ? [footer[i]] : [])];
-      const widest = Math.max(0, ...cells.map(c => measureWidth(c, FONT, true)));
+      const cells = [...dataRows.map(r => r[i]), ...(footer ? [footer[i]] : [])];
+      const widest = Math.max(0, ...cells.map(c => measureWidth(c, FONT, true))) + (i === 0 ? INDENT : 0);
       return Math.max(Math.min(Math.max(widest + PAD, 50), 220), headerMin[i]);
     });
     const total = natural.reduce((a, b) => a + b, 0);
@@ -467,10 +474,19 @@ async function generateTablePDF(data) {
     };
 
     // ---- Heading ----
-    text(title.toUpperCase(), left, TOP, { size: 13, bold: true, color: COLORS.accent, width: contentWidth, align: 'center' });
-    y = TOP + 24;
-    text(siteName, left, y, { size: 13, bold: true, width: contentWidth });
-    y += 20;
+    if (siteFirst) {
+      text(siteName, left, TOP, { size: 16, bold: true, width: contentWidth });
+      y = TOP + measureHeight(siteName, contentWidth, 16, true) + 8;
+      text(title, left, y, { size: 12.5, bold: true, color: COLORS.accent, width: contentWidth });
+      y += measureHeight(title, contentWidth, 12.5, true) + 4;
+      hr(y, COLORS.accent, 1.2);
+      y += 8;
+    } else {
+      text(title.toUpperCase(), left, TOP, { size: 13, bold: true, color: COLORS.accent, width: contentWidth, align: 'center' });
+      y = TOP + 24;
+      text(siteName, left, y, { size: 13, bold: true, width: contentWidth });
+      y += 20;
+    }
     [subtitle, ...meta].filter(Boolean).forEach(line => {
       text(line, left, y, { size: 9.5, color: COLORS.muted, width: contentWidth });
       y += measureHeight(line, contentWidth, 9.5) + 3;
@@ -483,15 +499,34 @@ async function generateTablePDF(data) {
       text('No entries', left, y + 10, { size: 10, color: COLORS.muted, width: contentWidth, align: 'center' });
       y += 34;
     }
+    const cellWidth = i => widths[i] - PAD - (i === 0 ? INDENT : 0);
+    const rowHeight = row => Math.max(...row.map((c, i) => measureHeight(c, cellWidth(i), FONT))) + 10;
+    let stripe = 0;
     rows.forEach((row, rIdx) => {
-      const height = Math.max(...row.map((c, i) => measureHeight(c, widths[i] - PAD, FONT))) + 10;
+      if (isGroup(row)) {
+        // Shaded heading row (e.g. a date), kept on the same page as its first row
+        const height = measureHeight(row.group, contentWidth - PAD, 10.5, true) + 12;
+        const next = rows[rIdx + 1];
+        const nextHeight = next && !isGroup(next) ? rowHeight(next) : 0;
+        if (y + height + nextHeight > bottomLimit) {
+          doc.addPage();
+          y = TOP;
+          tableHeader();
+        }
+        doc.rect(left, y, contentWidth, height).fill('#f3f6fa');
+        text(row.group, left + PAD / 2, y + 6, { size: 10.5, bold: true, color: COLORS.accent, width: contentWidth - PAD });
+        y += height;
+        return;
+      }
+      const height = rowHeight(row);
       if (y + height > bottomLimit) {
         doc.addPage();
         y = TOP;
         tableHeader();
       }
-      if (rIdx % 2 === 1) doc.rect(left, y, contentWidth, height).fill('#f8fafc');
-      row.forEach((c, i) => text(c, xs[i] + PAD / 2, y + 5, { size: FONT, width: widths[i] - PAD, align: align(i) }));
+      if (!hasGroups && stripe % 2 === 1) doc.rect(left, y, contentWidth, height).fill('#f8fafc');
+      stripe += 1;
+      row.forEach((c, i) => text(c, xs[i] + PAD / 2 + (i === 0 ? INDENT : 0), y + 5, { size: FONT, width: cellWidth(i), align: align(i) }));
       y += height;
       hr(y, '#e5e5e5', 0.5);
     });
@@ -519,6 +554,29 @@ async function generateTablePDF(data) {
       text(line.text, left, y, { size, bold: Boolean(line.bold), color: line.danger ? COLORS.danger : COLORS.accent, width: contentWidth, align: 'right' });
       y += height;
     });
+
+    // ---- Summary block (like the site report's Selected Period Summary) ----
+    const summaryLines = summary && Array.isArray(summary.lines) ? summary.lines : [];
+    if (summaryLines.length) {
+      y += 16;
+      if (y + 40 + summaryLines.length * 20 > bottomLimit) {
+        doc.addPage();
+        y = TOP;
+      }
+      if (summary.title) {
+        text(summary.title, left, y, { size: 12.5, bold: true, color: COLORS.accent, width: contentWidth });
+        y += measureHeight(summary.title, contentWidth, 12.5, true) + 4;
+        hr(y, COLORS.accent, 1.2);
+        y += 8;
+      }
+      summaryLines.forEach(line => {
+        const color = line.danger ? COLORS.danger : COLORS.dark;
+        text(line.label, left + 4, y, { size: 11, bold: Boolean(line.bold), color, width: contentWidth * 0.6, lineBreak: false });
+        text(line.value, left, y, { size: 11, bold: true, color, width: contentWidth - 4, align: 'right', lineBreak: false });
+        y += 20;
+        hr(y - 4, '#e5e5e5', 0.5);
+      });
+    }
 
     // ---- Footer on every page ----
     const pages = doc.bufferedPageRange();
