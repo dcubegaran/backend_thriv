@@ -295,7 +295,10 @@ async function generateTablePDF(data) {
     const isGroup = row => !Array.isArray(row);
     const dataRows = rows.filter(row => !isGroup(row));
     const hasGroups = dataRows.length !== rows.length;
-    const INDENT = hasGroups ? 14 : 0;
+    // { group, sub: true }: a second-level heading (e.g. a labour type under a date)
+    const hasSub = rows.some(row => isGroup(row) && row.sub);
+    const SUB_INDENT = 14;
+    const INDENT = hasSub ? 28 : hasGroups ? 14 : 0;
     const notes = Array.isArray(data.notes) ? data.notes.filter(n => n && (typeof n === 'string' || n.text)) : [];
 
     // Portrait, to match the letter pad behind every page
@@ -421,18 +424,30 @@ async function generateTablePDF(data) {
     let stripe = 0;
     rows.forEach((row, rIdx) => {
       if (isGroup(row)) {
-        // Shaded heading row (e.g. a date), kept on the same page as its first row
-        const height = measureHeight(row.group, contentWidth - PAD, 10.5, true) + 12;
-        const next = rows[rIdx + 1];
-        const nextHeight = next && !isGroup(next) ? rowHeight(next) : 0;
+        // Heading row (a date, shaded; or a sub-heading such as a labour type), kept on the same page
+        // as the first row under it
+        const indent = row.sub ? SUB_INDENT : 0;
+        const size = row.sub ? 10 : 10.5;
+        const height = measureHeight(row.group, contentWidth - PAD - indent, size, true) + (row.sub ? 10 : 12);
+        let nextHeight = 0;
+        for (let j = rIdx + 1; j < rows.length; j++) {
+          if (!isGroup(rows[j])) { nextHeight += rowHeight(rows[j]); break; }
+          nextHeight += 22; // a sub-heading before the first row
+        }
         if (y + height + nextHeight > bottomLimit) {
           doc.addPage();
           y = TOP;
           tableHeader();
         }
-        doc.rect(left, y, contentWidth, height).fill('#f3f6fa');
-        text(row.group, left + PAD / 2, y + 6, { size: 10.5, bold: true, color: COLORS.accent, width: contentWidth - PAD });
-        y += height;
+        if (row.sub) {
+          text(row.group, left + PAD / 2 + indent, y + 5, { size, bold: true, color: COLORS.dark, width: contentWidth - PAD - indent });
+          y += height;
+          hr(y, '#e5e5e5', 0.5);
+        } else {
+          doc.rect(left, y, contentWidth, height).fill('#f3f6fa');
+          text(row.group, left + PAD / 2, y + 6, { size, bold: true, color: COLORS.accent, width: contentWidth - PAD });
+          y += height;
+        }
         return;
       }
       const height = rowHeight(row);

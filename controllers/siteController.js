@@ -267,9 +267,10 @@ exports.downloadTablePdf = async (req, res) => {
       subtitle: cell(subtitle),
       meta: Array.isArray(meta) ? meta.slice(0, 5).map(cell) : [],
       headers: headers.map(cell),
-      // A row is its cells, or { group: 'text' } for a shaded heading row (e.g. a date)
+      // A row is its cells, or { group: 'text' } for a shaded heading row (e.g. a date),
+      // or { group, sub: true } for a heading under it (e.g. a labour type)
       rows: rows.map(r => (r && !Array.isArray(r) && typeof r === 'object' && r.group != null
-        ? { group: cell(r.group) }
+        ? { group: cell(r.group), sub: Boolean(r.sub) }
         : Array.from({ length: width }, (_, i) => cell(Array.isArray(r) ? r[i] : '')))),
       numeric: Array.isArray(numeric) ? numeric.filter(n => Number.isInteger(n)) : [],
       footer: Array.isArray(footer) ? Array.from({ length: width }, (_, i) => cell(footer[i])) : null,
